@@ -10,10 +10,13 @@ from verl.trainer.ppo.ray_trainer import (
     _pop_direct_opd_rollout_options,
 )
 from verl.workers.actor.dp_actor import (
+    _build_random_fraction_token_mask,
     _build_top_fraction_token_mask,
     _compute_delta_opd_rm_scores,
     _compute_topk_js_divergence,
+    _derive_random_token_selection_seed,
 )
+from verl.workers.config.actor import ActorConfig
 
 
 def test_direct_opd_reward_uses_detached_student_topk_weights():
@@ -242,3 +245,70 @@ def test_top_fraction_js_mask_is_computed_per_response_with_ceil():
     assert not selected[0, 20]
     assert selected[1, 19]
     assert selected[1, 20]
+
+
+def test_random_fraction_token_mask_uses_valid_tokens_and_ceil():
+    response_mask = torch.ones(3, 21, dtype=torch.long)
+    response_mask[0, -1] = 0
+    response_mask[2] = 0
+
+    selected = _build_random_fraction_token_mask(
+        response_mask=response_mask,
+        top_fraction=0.10,
+        seed=42,
+    )
+
+    assert selected[0].sum().item() == 2  # ceil(20 * 0.10)
+    assert selected[1].sum().item() == 3  # ceil(21 * 0.10)
+    assert selected[2].sum().item() == 0
+    assert not selected[~response_mask.bool()].any()
+
+
+def test_random_fraction_token_mask_is_reproducible_and_changes_by_step():
+    response_mask = torch.ones(4, 100, dtype=torch.long)
+    step_1_seed = _derive_random_token_selection_seed(
+        base_seed=42,
+        global_step=1,
+        data_parallel_rank=0,
+        data_parallel_world_size=8,
+    )
+    step_2_seed = _derive_random_token_selection_seed(
+        base_seed=42,
+        global_step=2,
+        data_parallel_rank=0,
+        data_parallel_world_size=8,
+    )
+
+    selected_1 = _build_random_fraction_token_mask(response_mask, top_fraction=0.10, seed=step_1_seed)
+    selected_1_repeat = _build_random_fraction_token_mask(response_mask, top_fraction=0.10, seed=step_1_seed)
+    selected_2 = _build_random_fraction_token_mask(response_mask, top_fraction=0.10, seed=step_2_seed)
+
+    assert step_1_seed == 42
+    assert step_2_seed == 50
+    assert torch.equal(selected_1, selected_1_repeat)
+    assert not torch.equal(selected_1, selected_2)
+
+
+def test_random_fraction_token_mask_does_not_follow_js_ranking():
+    response_mask = torch.ones(1, 100, dtype=torch.long)
+    js_divergence = torch.arange(100, dtype=torch.float32).view(1, 100)
+
+    random_selected = _build_random_fraction_token_mask(response_mask, top_fraction=0.10, seed=42)
+    top_js_selected = _build_top_fraction_token_mask(js_divergence, response_mask, top_fraction=0.10)
+
+    assert random_selected.sum().item() == top_js_selected.sum().item() == 10
+    assert not torch.equal(random_selected, top_js_selected)
+
+
+def test_actor_config_rejects_invalid_js_token_selection_mode():
+    try:
+        ActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            js_token_selection_mode="largest",
+        )
+    except ValueError as exc:
+        assert "js_token_selection_mode" in str(exc)
+    else:
+        raise AssertionError("Expected invalid js_token_selection_mode to raise ValueError")

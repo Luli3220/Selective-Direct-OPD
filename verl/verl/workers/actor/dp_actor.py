@@ -42,9 +42,11 @@ from verl.workers.config import ActorConfig
 
 __all__ = [
     "DataParallelPPOActor",
+    "_build_random_fraction_token_mask",
     "_build_top_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
     "_compute_topk_js_divergence",
+    "_derive_random_token_selection_seed",
 ]
 
 logger = logging.getLogger(__file__)
@@ -177,6 +179,54 @@ def _build_top_fraction_token_mask(
         selected_local_indices = torch.topk(local_scores, k=keep_count, sorted=False).indices
         selected_mask[batch_index, valid_indices[selected_local_indices]] = True
     return selected_mask
+
+
+def _build_random_fraction_token_mask(
+    response_mask: torch.Tensor,
+    top_fraction: float,
+    seed: int,
+) -> torch.Tensor:
+    """Uniformly sample valid token positions without replacement per response."""
+    if response_mask.dim() != 2:
+        raise ValueError(f"Random token filtering expects a [B, T] response_mask, got {tuple(response_mask.shape)}")
+    if not 0.0 < top_fraction <= 1.0:
+        raise ValueError(f"top_fraction must be in (0, 1], got {top_fraction}")
+    if seed < 0:
+        raise ValueError(f"seed must be non-negative, got {seed}")
+
+    valid_mask = response_mask.bool()
+    selected_mask = torch.zeros_like(valid_mask)
+    generator = torch.Generator(device=response_mask.device)
+    generator.manual_seed(seed)
+    for batch_index in range(response_mask.shape[0]):
+        valid_indices = torch.nonzero(valid_mask[batch_index], as_tuple=False).squeeze(-1)
+        if valid_indices.numel() == 0:
+            continue
+        keep_count = max(1, math.ceil(valid_indices.numel() * top_fraction))
+        permutation = torch.randperm(valid_indices.numel(), generator=generator, device=response_mask.device)
+        selected_mask[batch_index, valid_indices[permutation[:keep_count]]] = True
+    return selected_mask
+
+
+def _derive_random_token_selection_seed(
+    base_seed: int,
+    global_step: int,
+    data_parallel_rank: int,
+    data_parallel_world_size: int,
+) -> int:
+    """Derive a deterministic per-step, per-data-parallel-rank random seed."""
+    if base_seed < 0:
+        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
+    if data_parallel_world_size <= 0:
+        raise ValueError(f"data_parallel_world_size must be positive, got {data_parallel_world_size}")
+    if not 0 <= data_parallel_rank < data_parallel_world_size:
+        raise ValueError(
+            "data_parallel_rank must be in [0, data_parallel_world_size), "
+            f"got rank={data_parallel_rank}, world_size={data_parallel_world_size}"
+        )
+
+    step_offset = max(int(global_step) - 1, 0) * data_parallel_world_size
+    return int(base_seed) + step_offset + data_parallel_rank
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -887,8 +937,54 @@ class DataParallelPPOActor(BasePPOActor):
 
         effective_kl_loss_coef = float(data.meta_info.get("actor_kl_loss_coef", self.config.kl_loss_coef))
         js_token_filter_enabled = bool(self.config.get("js_token_filter_enabled", False))
+        js_token_selection_mode = str(self.config.get("js_token_selection_mode", "top_js"))
         if js_token_filter_enabled and "js_divergence" not in data.batch.keys():
             raise ValueError("JS token filtering is enabled, but js_divergence is missing from the training batch")
+        if js_token_filter_enabled:
+            response_mask = data.batch["response_mask"]
+            js_divergence = data.batch["js_divergence"]
+            selection_response_mask = response_mask.to(js_divergence.device)
+            if js_token_selection_mode == "top_js":
+                js_token_selection_mask = _build_top_fraction_token_mask(
+                    js_divergence=js_divergence,
+                    response_mask=selection_response_mask,
+                    top_fraction=float(self.config.js_top_fraction),
+                )
+            elif js_token_selection_mode == "random":
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    global_rank = torch.distributed.get_rank()
+                    global_world_size = torch.distributed.get_world_size()
+                else:
+                    global_rank = 0
+                    global_world_size = 1
+
+                sequence_parallel_size = int(self.ulysses_sequence_parallel_size)
+                if global_world_size % sequence_parallel_size != 0:
+                    raise ValueError(
+                        f"world size {global_world_size} must be divisible by sequence parallel size "
+                        f"{sequence_parallel_size}"
+                    )
+                data_parallel_world_size = global_world_size // sequence_parallel_size
+                data_parallel_rank = global_rank // sequence_parallel_size
+                if "global_steps" not in data.meta_info:
+                    raise ValueError("Random token selection requires global_steps in data.meta_info")
+                selection_seed = _derive_random_token_selection_seed(
+                    base_seed=int(self.config.js_token_selection_seed),
+                    global_step=int(data.meta_info["global_steps"]),
+                    data_parallel_rank=data_parallel_rank,
+                    data_parallel_world_size=data_parallel_world_size,
+                )
+                js_token_selection_mask = _build_random_fraction_token_mask(
+                    response_mask=selection_response_mask,
+                    top_fraction=float(self.config.js_top_fraction),
+                    seed=selection_seed,
+                )
+            else:
+                raise ValueError(
+                    "js_token_selection_mode must be one of ['random', 'top_js'], "
+                    f"got {js_token_selection_mode!r}"
+                )
+            data.batch["js_token_selection_mask"] = js_token_selection_mask
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
@@ -905,6 +1001,7 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         if js_token_filter_enabled:
             select_keys.append("js_divergence")
+            select_keys.append("js_token_selection_mask")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
@@ -971,11 +1068,7 @@ class DataParallelPPOActor(BasePPOActor):
                     loss_response_mask = response_mask
                     if js_token_filter_enabled:
                         js_divergence = model_inputs["js_divergence"]
-                        js_token_mask = _build_top_fraction_token_mask(
-                            js_divergence=js_divergence,
-                            response_mask=response_mask,
-                            top_fraction=float(self.config.js_top_fraction),
-                        )
+                        js_token_mask = model_inputs["js_token_selection_mask"].bool()
                         loss_response_mask = response_mask * js_token_mask.to(response_mask.dtype)
                         valid_js = js_divergence[response_mask.bool()]
                         selected_js = js_divergence[js_token_mask]
@@ -983,9 +1076,11 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/js_token_keep_ratio"] = (
                             loss_response_mask.sum() / valid_token_count
                         ).detach().item()
-                        micro_batch_metrics["actor/js_valid_mean"] = valid_js.mean().detach().item()
-                        micro_batch_metrics["actor/js_selected_mean"] = selected_js.mean().detach().item()
-                        micro_batch_metrics["actor/js_selected_min"] = selected_js.min().detach().item()
+                        if valid_js.numel() > 0:
+                            micro_batch_metrics["actor/js_valid_mean"] = valid_js.mean().detach().item()
+                        if selected_js.numel() > 0:
+                            micro_batch_metrics["actor/js_selected_mean"] = selected_js.mean().detach().item()
+                            micro_batch_metrics["actor/js_selected_min"] = selected_js.min().detach().item()
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode

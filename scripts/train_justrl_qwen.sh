@@ -59,6 +59,8 @@ USE_KL_LOSS=${USE_KL_LOSS:-True}
 ADAPTIVE_KL_LOSS_COEF=${ADAPTIVE_KL_LOSS_COEF:-True}
 JS_TOKEN_FILTER_ENABLED=${JS_TOKEN_FILTER_ENABLED:-False}
 JS_TOP_FRACTION=${JS_TOP_FRACTION:-0.05}
+JS_TOKEN_SELECTION_MODE=${JS_TOKEN_SELECTION_MODE:-top_js}
+JS_TOKEN_SELECTION_SEED=${JS_TOKEN_SELECTION_SEED:-42}
 ADAPTIVE_KL_LOSS_REWARD_KEY=${ADAPTIVE_KL_LOSS_REWARD_KEY:-delta_opd/weighted_reward_mean}
 ADAPTIVE_KL_LOSS_EPS=${ADAPTIVE_KL_LOSS_EPS:-0.01}
 ADAPTIVE_KL_LOSS_MIN_COEF=${ADAPTIVE_KL_LOSS_MIN_COEF:-0.5}
@@ -144,6 +146,8 @@ set +e
   actor_rollout_ref.actor.adaptive_kl_loss_coef="${ADAPTIVE_KL_LOSS_COEF}" \
   actor_rollout_ref.actor.js_token_filter_enabled="${JS_TOKEN_FILTER_ENABLED}" \
   actor_rollout_ref.actor.js_top_fraction="${JS_TOP_FRACTION}" \
+  actor_rollout_ref.actor.js_token_selection_mode="${JS_TOKEN_SELECTION_MODE}" \
+  actor_rollout_ref.actor.js_token_selection_seed="${JS_TOKEN_SELECTION_SEED}" \
   actor_rollout_ref.actor.adaptive_kl_loss_reward_key="${ADAPTIVE_KL_LOSS_REWARD_KEY}" \
   actor_rollout_ref.actor.adaptive_kl_loss_eps="${ADAPTIVE_KL_LOSS_EPS}" \
   actor_rollout_ref.actor.adaptive_kl_loss_min_coef="${ADAPTIVE_KL_LOSS_MIN_COEF}" \
