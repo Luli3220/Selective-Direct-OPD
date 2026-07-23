@@ -80,7 +80,7 @@ js_token_filter_enabled: false
 # Per-response fraction of valid token positions retained for actor loss
 js_top_fraction: 0.05
 
-# Token selection mode when JS token filtering is enabled: top_js or random
+# Token selection mode when JS token filtering is enabled: top_js, bottom_js, or random
 js_token_selection_mode: top_js
 
 # Base seed for reproducible random token selection

@@ -42,6 +42,7 @@ from verl.workers.config import ActorConfig
 
 __all__ = [
     "DataParallelPPOActor",
+    "_build_bottom_fraction_token_mask",
     "_build_random_fraction_token_mask",
     "_build_top_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
@@ -177,6 +178,41 @@ def _build_top_fraction_token_mask(
         keep_count = max(1, math.ceil(valid_indices.numel() * top_fraction))
         local_scores = ranking_scores[batch_index, valid_indices]
         selected_local_indices = torch.topk(local_scores, k=keep_count, sorted=False).indices
+        selected_mask[batch_index, valid_indices[selected_local_indices]] = True
+    return selected_mask
+
+
+def _build_bottom_fraction_token_mask(
+    js_divergence: torch.Tensor,
+    response_mask: torch.Tensor,
+    bottom_fraction: float,
+) -> torch.Tensor:
+    """Select the lowest-JS valid tokens independently within each response."""
+    if js_divergence.shape != response_mask.shape:
+        raise ValueError(
+            "js_divergence and response_mask must have the same shape: "
+            f"js_divergence={tuple(js_divergence.shape)}, response_mask={tuple(response_mask.shape)}"
+        )
+    if js_divergence.dim() != 2:
+        raise ValueError(f"JS token filtering expects [B, T] tensors, got {tuple(js_divergence.shape)}")
+    if not 0.0 < bottom_fraction <= 1.0:
+        raise ValueError(f"bottom_fraction must be in (0, 1], got {bottom_fraction}")
+
+    valid_mask = response_mask.bool()
+    selected_mask = torch.zeros_like(valid_mask)
+    ranking_scores = torch.nan_to_num(js_divergence.detach().float(), nan=torch.inf)
+    for batch_index in range(js_divergence.shape[0]):
+        valid_indices = torch.nonzero(valid_mask[batch_index], as_tuple=False).squeeze(-1)
+        if valid_indices.numel() == 0:
+            continue
+        keep_count = max(1, math.ceil(valid_indices.numel() * bottom_fraction))
+        local_scores = ranking_scores[batch_index, valid_indices]
+        selected_local_indices = torch.topk(
+            local_scores,
+            k=keep_count,
+            largest=False,
+            sorted=False,
+        ).indices
         selected_mask[batch_index, valid_indices[selected_local_indices]] = True
     return selected_mask
 
@@ -950,6 +986,12 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask=selection_response_mask,
                     top_fraction=float(self.config.js_top_fraction),
                 )
+            elif js_token_selection_mode == "bottom_js":
+                js_token_selection_mask = _build_bottom_fraction_token_mask(
+                    js_divergence=js_divergence,
+                    response_mask=selection_response_mask,
+                    bottom_fraction=float(self.config.js_top_fraction),
+                )
             elif js_token_selection_mode == "random":
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
                     global_rank = torch.distributed.get_rank()
@@ -981,7 +1023,7 @@ class DataParallelPPOActor(BasePPOActor):
                 )
             else:
                 raise ValueError(
-                    "js_token_selection_mode must be one of ['random', 'top_js'], "
+                    "js_token_selection_mode must be one of ['bottom_js', 'random', 'top_js'], "
                     f"got {js_token_selection_mode!r}"
                 )
             data.batch["js_token_selection_mask"] = js_token_selection_mask

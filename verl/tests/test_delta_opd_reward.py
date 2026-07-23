@@ -10,6 +10,7 @@ from verl.trainer.ppo.ray_trainer import (
     _pop_direct_opd_rollout_options,
 )
 from verl.workers.actor.dp_actor import (
+    _build_bottom_fraction_token_mask,
     _build_random_fraction_token_mask,
     _build_top_fraction_token_mask,
     _compute_delta_opd_rm_scores,
@@ -247,6 +248,27 @@ def test_top_fraction_js_mask_is_computed_per_response_with_ceil():
     assert selected[1, 20]
 
 
+def test_bottom_fraction_js_mask_is_computed_per_response_with_ceil():
+    js_divergence = torch.arange(42, dtype=torch.float32).view(2, 21)
+    response_mask = torch.ones(2, 21, dtype=torch.long)
+    response_mask[0, -1] = 0
+
+    selected = _build_bottom_fraction_token_mask(
+        js_divergence=js_divergence,
+        response_mask=response_mask,
+        bottom_fraction=0.10,
+    )
+
+    assert selected[0].sum().item() == 2  # ceil(20 * 0.10)
+    assert selected[1].sum().item() == 3  # ceil(21 * 0.10)
+    assert selected[0, 0]
+    assert selected[0, 1]
+    assert not selected[0, 20]
+    assert selected[1, 0]
+    assert selected[1, 1]
+    assert selected[1, 2]
+
+
 def test_random_fraction_token_mask_uses_valid_tokens_and_ceil():
     response_mask = torch.ones(3, 21, dtype=torch.long)
     response_mask[0, -1] = 0
@@ -298,6 +320,17 @@ def test_random_fraction_token_mask_does_not_follow_js_ranking():
 
     assert random_selected.sum().item() == top_js_selected.sum().item() == 10
     assert not torch.equal(random_selected, top_js_selected)
+
+
+def test_actor_config_accepts_bottom_js_token_selection_mode():
+    config = ActorConfig(
+        strategy="fsdp",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        js_token_selection_mode="bottom_js",
+    )
+
+    assert config.js_token_selection_mode == "bottom_js"
 
 
 def test_actor_config_rejects_invalid_js_token_selection_mode():
