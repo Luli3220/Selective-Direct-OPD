@@ -42,9 +42,8 @@ from verl.workers.config import ActorConfig
 
 __all__ = [
     "DataParallelPPOActor",
-    "_build_bottom_fraction_token_mask",
+    "_build_js_ladder_token_mask",
     "_build_random_fraction_token_mask",
-    "_build_top_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
     "_compute_topk_js_divergence",
     "_derive_random_token_selection_seed",
@@ -152,12 +151,22 @@ def _compute_topk_js_divergence(
     return js_divergence.clamp(min=0.0, max=math.log(2.0)).detach()
 
 
-def _build_top_fraction_token_mask(
+def _build_js_ladder_token_mask(
     js_divergence: torch.Tensor,
     response_mask: torch.Tensor,
-    top_fraction: float,
+    start_percent: float,
+    end_percent: float,
 ) -> torch.Tensor:
-    """Select the highest-JS valid tokens independently within each response."""
+    """Select a JS-ranked percentile interval independently within each response.
+
+    Valid positions are ranked from the lowest to the highest JS divergence. The
+    selected interval is ``[start_percent, end_percent)`` on that ordering, so
+    ``0_10`` is the lowest 10% and ``90_100`` is the highest 10%.
+
+    The interval width determines the retained count using the existing
+    ``max(1, ceil(valid_tokens * width))`` rule. This keeps ``0_10`` and
+    ``90_100`` exactly equivalent to the former bottom-10% and top-10% masks.
+    """
     if js_divergence.shape != response_mask.shape:
         raise ValueError(
             "js_divergence and response_mask must have the same shape: "
@@ -165,54 +174,27 @@ def _build_top_fraction_token_mask(
         )
     if js_divergence.dim() != 2:
         raise ValueError(f"JS token filtering expects [B, T] tensors, got {tuple(js_divergence.shape)}")
-    if not 0.0 < top_fraction <= 1.0:
-        raise ValueError(f"top_fraction must be in (0, 1], got {top_fraction}")
-
-    valid_mask = response_mask.bool()
-    selected_mask = torch.zeros_like(valid_mask)
-    ranking_scores = torch.nan_to_num(js_divergence.detach().float(), nan=-torch.inf)
-    for batch_index in range(js_divergence.shape[0]):
-        valid_indices = torch.nonzero(valid_mask[batch_index], as_tuple=False).squeeze(-1)
-        if valid_indices.numel() == 0:
-            continue
-        keep_count = max(1, math.ceil(valid_indices.numel() * top_fraction))
-        local_scores = ranking_scores[batch_index, valid_indices]
-        selected_local_indices = torch.topk(local_scores, k=keep_count, sorted=False).indices
-        selected_mask[batch_index, valid_indices[selected_local_indices]] = True
-    return selected_mask
-
-
-def _build_bottom_fraction_token_mask(
-    js_divergence: torch.Tensor,
-    response_mask: torch.Tensor,
-    bottom_fraction: float,
-) -> torch.Tensor:
-    """Select the lowest-JS valid tokens independently within each response."""
-    if js_divergence.shape != response_mask.shape:
+    if not 0.0 <= start_percent < end_percent <= 100.0:
         raise ValueError(
-            "js_divergence and response_mask must have the same shape: "
-            f"js_divergence={tuple(js_divergence.shape)}, response_mask={tuple(response_mask.shape)}"
+            "JS ladder bounds must satisfy 0 <= start_percent < end_percent <= 100, "
+            f"got start_percent={start_percent}, end_percent={end_percent}"
         )
-    if js_divergence.dim() != 2:
-        raise ValueError(f"JS token filtering expects [B, T] tensors, got {tuple(js_divergence.shape)}")
-    if not 0.0 < bottom_fraction <= 1.0:
-        raise ValueError(f"bottom_fraction must be in (0, 1], got {bottom_fraction}")
 
     valid_mask = response_mask.bool()
     selected_mask = torch.zeros_like(valid_mask)
-    ranking_scores = torch.nan_to_num(js_divergence.detach().float(), nan=torch.inf)
+    ranking_scores = js_divergence.detach().float()
+    interval_fraction = (end_percent - start_percent) / 100.0
     for batch_index in range(js_divergence.shape[0]):
         valid_indices = torch.nonzero(valid_mask[batch_index], as_tuple=False).squeeze(-1)
         if valid_indices.numel() == 0:
             continue
-        keep_count = max(1, math.ceil(valid_indices.numel() * bottom_fraction))
+        valid_count = valid_indices.numel()
+        keep_count = max(1, math.ceil(valid_count * interval_fraction))
+        start_index = math.floor(valid_count * start_percent / 100.0)
+        start_index = min(start_index, valid_count - keep_count)
         local_scores = ranking_scores[batch_index, valid_indices]
-        selected_local_indices = torch.topk(
-            local_scores,
-            k=keep_count,
-            largest=False,
-            sorted=False,
-        ).indices
+        sorted_local_indices = torch.argsort(local_scores, stable=True)
+        selected_local_indices = sorted_local_indices[start_index : start_index + keep_count]
         selected_mask[batch_index, valid_indices[selected_local_indices]] = True
     return selected_mask
 
@@ -980,17 +962,21 @@ class DataParallelPPOActor(BasePPOActor):
             response_mask = data.batch["response_mask"]
             js_divergence = data.batch["js_divergence"]
             selection_response_mask = response_mask.to(js_divergence.device)
-            if js_token_selection_mode == "top_js":
-                js_token_selection_mask = _build_top_fraction_token_mask(
+            if js_token_selection_mode in {"ladder", "top_js", "bottom_js"}:
+                if js_token_selection_mode == "ladder":
+                    start_percent = float(self.config.js_ladder_start_percent)
+                    end_percent = float(self.config.js_ladder_end_percent)
+                elif js_token_selection_mode == "top_js":
+                    end_percent = 100.0
+                    start_percent = end_percent - 100.0 * float(self.config.js_top_fraction)
+                else:
+                    start_percent = 0.0
+                    end_percent = 100.0 * float(self.config.js_top_fraction)
+                js_token_selection_mask = _build_js_ladder_token_mask(
                     js_divergence=js_divergence,
                     response_mask=selection_response_mask,
-                    top_fraction=float(self.config.js_top_fraction),
-                )
-            elif js_token_selection_mode == "bottom_js":
-                js_token_selection_mask = _build_bottom_fraction_token_mask(
-                    js_divergence=js_divergence,
-                    response_mask=selection_response_mask,
-                    bottom_fraction=float(self.config.js_top_fraction),
+                    start_percent=start_percent,
+                    end_percent=end_percent,
                 )
             elif js_token_selection_mode == "random":
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -1023,7 +1009,7 @@ class DataParallelPPOActor(BasePPOActor):
                 )
             else:
                 raise ValueError(
-                    "js_token_selection_mode must be one of ['bottom_js', 'random', 'top_js'], "
+                    "js_token_selection_mode must be one of ['bottom_js', 'ladder', 'random', 'top_js'], "
                     f"got {js_token_selection_mode!r}"
                 )
             data.batch["js_token_selection_mask"] = js_token_selection_mask

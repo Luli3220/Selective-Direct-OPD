@@ -74,7 +74,10 @@ class ActorConfig(BaseConfig):
         entropy_coeff (float): Entropy coefficient for regularization.
         js_token_filter_enabled (bool): Whether to filter response-token positions in actor loss.
         js_top_fraction (float): Per-response fraction of valid token positions retained for actor loss.
-        js_token_selection_mode (str): Token selection mode. Options: 'top_js', 'bottom_js', 'random'.
+        js_token_selection_mode (str): Token selection mode. Options: 'ladder', 'random', plus legacy
+            aliases 'top_js' and 'bottom_js'.
+        js_ladder_start_percent (float): Lower JS-rank percentile for ladder selection.
+        js_ladder_end_percent (float): Upper JS-rank percentile for ladder selection.
         js_token_selection_seed (int): Base seed used by random token selection.
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
@@ -113,6 +116,8 @@ class ActorConfig(BaseConfig):
     js_token_filter_enabled: bool = False
     js_top_fraction: float = 0.05
     js_token_selection_mode: str = "top_js"
+    js_ladder_start_percent: float = 90.0
+    js_ladder_end_percent: float = 100.0
     js_token_selection_seed: int = 42
     use_kl_loss: bool = False
     use_torch_compile: bool = True
@@ -162,11 +167,17 @@ class ActorConfig(BaseConfig):
 
         if not 0.0 < self.js_top_fraction <= 1.0:
             raise ValueError(f"js_top_fraction must be in (0, 1], got {self.js_top_fraction}")
-        valid_js_token_selection_modes = {"top_js", "bottom_js", "random"}
+        valid_js_token_selection_modes = {"top_js", "bottom_js", "ladder", "random"}
         if self.js_token_selection_mode not in valid_js_token_selection_modes:
             raise ValueError(
                 "js_token_selection_mode must be one of "
                 f"{sorted(valid_js_token_selection_modes)}, got {self.js_token_selection_mode!r}"
+            )
+        if not 0.0 <= self.js_ladder_start_percent < self.js_ladder_end_percent <= 100.0:
+            raise ValueError(
+                "JS ladder bounds must satisfy "
+                "0 <= js_ladder_start_percent < js_ladder_end_percent <= 100, "
+                f"got start={self.js_ladder_start_percent}, end={self.js_ladder_end_percent}"
             )
         if self.js_token_selection_seed < 0:
             raise ValueError(f"js_token_selection_seed must be non-negative, got {self.js_token_selection_seed}")

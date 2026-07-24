@@ -10,9 +10,8 @@ from verl.trainer.ppo.ray_trainer import (
     _pop_direct_opd_rollout_options,
 )
 from verl.workers.actor.dp_actor import (
-    _build_bottom_fraction_token_mask,
+    _build_js_ladder_token_mask,
     _build_random_fraction_token_mask,
-    _build_top_fraction_token_mask,
     _compute_delta_opd_rm_scores,
     _compute_topk_js_divergence,
     _derive_random_token_selection_seed,
@@ -229,34 +228,38 @@ def test_topk_js_divergence_includes_remaining_mass_as_tail_bucket():
     assert torch.allclose(js_divergence, expected.view(1, 1), atol=1e-7)
 
 
-def test_top_fraction_js_mask_is_computed_per_response_with_ceil():
+def test_ladder_90_100_matches_top_fraction_with_ceil():
     js_divergence = torch.arange(42, dtype=torch.float32).view(2, 21)
     response_mask = torch.ones(2, 21, dtype=torch.long)
     response_mask[0, -1] = 0
 
-    selected = _build_top_fraction_token_mask(
+    selected = _build_js_ladder_token_mask(
         js_divergence=js_divergence,
         response_mask=response_mask,
-        top_fraction=0.05,
+        start_percent=90,
+        end_percent=100,
     )
 
-    assert selected[0].sum().item() == 1  # ceil(20 * 0.05)
-    assert selected[1].sum().item() == 2  # ceil(21 * 0.05)
+    assert selected[0].sum().item() == 2  # ceil(20 * 0.10)
+    assert selected[1].sum().item() == 3  # ceil(21 * 0.10)
+    assert selected[0, 18]
     assert selected[0, 19]
     assert not selected[0, 20]
+    assert selected[1, 18]
     assert selected[1, 19]
     assert selected[1, 20]
 
 
-def test_bottom_fraction_js_mask_is_computed_per_response_with_ceil():
+def test_ladder_0_10_matches_bottom_fraction_with_ceil():
     js_divergence = torch.arange(42, dtype=torch.float32).view(2, 21)
     response_mask = torch.ones(2, 21, dtype=torch.long)
     response_mask[0, -1] = 0
 
-    selected = _build_bottom_fraction_token_mask(
+    selected = _build_js_ladder_token_mask(
         js_divergence=js_divergence,
         response_mask=response_mask,
-        bottom_fraction=0.10,
+        start_percent=0,
+        end_percent=10,
     )
 
     assert selected[0].sum().item() == 2  # ceil(20 * 0.10)
@@ -267,6 +270,55 @@ def test_bottom_fraction_js_mask_is_computed_per_response_with_ceil():
     assert selected[1, 0]
     assert selected[1, 1]
     assert selected[1, 2]
+
+
+def test_ladder_middle_interval_uses_js_rank_and_ignores_padding():
+    js_divergence = torch.arange(40, dtype=torch.float32).view(2, 20)
+    response_mask = torch.ones(2, 20, dtype=torch.long)
+    response_mask[0, -4:] = 0
+
+    selected = _build_js_ladder_token_mask(
+        js_divergence=js_divergence,
+        response_mask=response_mask,
+        start_percent=40,
+        end_percent=50,
+    )
+
+    assert selected[0].sum().item() == 2  # ceil(16 * 0.10)
+    assert selected[0, 6]
+    assert selected[0, 7]
+    assert selected[1].sum().item() == 2  # ceil(20 * 0.10)
+    assert selected[1, 8]
+    assert selected[1, 9]
+    assert not selected[~response_mask.bool()].any()
+
+
+def test_ladder_mask_handles_empty_response():
+    js_divergence = torch.arange(10, dtype=torch.float32).view(1, 10)
+    response_mask = torch.zeros(1, 10, dtype=torch.long)
+
+    selected = _build_js_ladder_token_mask(
+        js_divergence=js_divergence,
+        response_mask=response_mask,
+        start_percent=90,
+        end_percent=100,
+    )
+
+    assert not selected.any()
+
+
+def test_ladder_mask_rejects_invalid_bounds():
+    try:
+        _build_js_ladder_token_mask(
+            js_divergence=torch.zeros(1, 10),
+            response_mask=torch.ones(1, 10),
+            start_percent=90,
+            end_percent=90,
+        )
+    except ValueError as exc:
+        assert "ladder bounds" in str(exc)
+    else:
+        raise AssertionError("Expected invalid ladder bounds to raise ValueError")
 
 
 def test_random_fraction_token_mask_uses_valid_tokens_and_ceil():
@@ -316,21 +368,30 @@ def test_random_fraction_token_mask_does_not_follow_js_ranking():
     js_divergence = torch.arange(100, dtype=torch.float32).view(1, 100)
 
     random_selected = _build_random_fraction_token_mask(response_mask, top_fraction=0.10, seed=42)
-    top_js_selected = _build_top_fraction_token_mask(js_divergence, response_mask, top_fraction=0.10)
+    top_js_selected = _build_js_ladder_token_mask(
+        js_divergence,
+        response_mask,
+        start_percent=90,
+        end_percent=100,
+    )
 
     assert random_selected.sum().item() == top_js_selected.sum().item() == 10
     assert not torch.equal(random_selected, top_js_selected)
 
 
-def test_actor_config_accepts_bottom_js_token_selection_mode():
+def test_actor_config_accepts_ladder_token_selection_mode():
     config = ActorConfig(
         strategy="fsdp",
         rollout_n=1,
         ppo_micro_batch_size_per_gpu=1,
-        js_token_selection_mode="bottom_js",
+        js_token_selection_mode="ladder",
+        js_ladder_start_percent=20,
+        js_ladder_end_percent=30,
     )
 
-    assert config.js_token_selection_mode == "bottom_js"
+    assert config.js_token_selection_mode == "ladder"
+    assert config.js_ladder_start_percent == 20
+    assert config.js_ladder_end_percent == 30
 
 
 def test_actor_config_rejects_invalid_js_token_selection_mode():
@@ -345,3 +406,19 @@ def test_actor_config_rejects_invalid_js_token_selection_mode():
         assert "js_token_selection_mode" in str(exc)
     else:
         raise AssertionError("Expected invalid js_token_selection_mode to raise ValueError")
+
+
+def test_actor_config_rejects_invalid_ladder_bounds():
+    try:
+        ActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            js_token_selection_mode="ladder",
+            js_ladder_start_percent=30,
+            js_ladder_end_percent=20,
+        )
+    except ValueError as exc:
+        assert "ladder bounds" in str(exc)
+    else:
+        raise AssertionError("Expected invalid ladder bounds to raise ValueError")
