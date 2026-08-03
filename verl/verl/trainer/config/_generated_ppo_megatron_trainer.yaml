@@ -81,6 +81,7 @@ actor_rollout_ref:
     js_ladder_start_percent: 90.0
     js_ladder_end_percent: 100.0
     js_token_selection_seed: 42
+    divergence_estimator: JSD
     use_kl_loss: false
     use_torch_compile: true
     kl_loss_coef: 2.5

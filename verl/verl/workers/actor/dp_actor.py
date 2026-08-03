@@ -45,6 +45,7 @@ __all__ = [
     "_build_js_ladder_token_mask",
     "_build_random_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
+    "_compute_topk_divergence",
     "_compute_topk_js_divergence",
     "_derive_random_token_selection_seed",
 ]
@@ -95,60 +96,80 @@ def _compute_delta_opd_rm_scores(
     return rm_scores, delta.detach()
 
 
+def _compute_topk_divergence(
+    pi_t_logp: torch.Tensor,
+    pi_t_ref_logp: torch.Tensor,
+    estimator: str,
+    valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute token-level divergence using top-k probabilities plus a tail bucket."""
+    valid_estimators = {"JSD", "FKL", "RKL"}
+    if estimator not in valid_estimators:
+        raise ValueError(f"estimator must be one of {sorted(valid_estimators)}, got {estimator!r}")
+    if pi_t_logp.shape != pi_t_ref_logp.shape:
+        raise ValueError(
+            "Divergence log-prob tensors must have the same shape: "
+            f"pi_t_logp={tuple(pi_t_logp.shape)}, pi_t_ref_logp={tuple(pi_t_ref_logp.shape)}"
+        )
+    if pi_t_logp.dim() != 3:
+        raise ValueError(f"Divergence expects [B, T, K] tensors, got {tuple(pi_t_logp.shape)}")
+    if valid_mask is not None and valid_mask.shape != pi_t_logp.shape:
+        raise ValueError(
+            "Divergence valid_mask must have the same shape as the log-prob tensors: "
+            f"valid_mask={tuple(valid_mask.shape)}, pi_t_logp={tuple(pi_t_logp.shape)}"
+        )
+
+    pi_t_logp = pi_t_logp.detach().float()
+    pi_t_ref_logp = pi_t_ref_logp.detach().float()
+    finite_mask = torch.isfinite(pi_t_logp) & torch.isfinite(pi_t_ref_logp)
+    pi_t_logp = pi_t_logp.clamp_max(0.0)
+    pi_t_ref_logp = pi_t_ref_logp.clamp_max(0.0)
+    if valid_mask is not None:
+        finite_mask &= valid_mask.bool()
+
+    pi_t_probs = torch.where(finite_mask, pi_t_logp.exp(), torch.zeros_like(pi_t_logp))
+    pi_t_ref_probs = torch.where(finite_mask, pi_t_ref_logp.exp(), torch.zeros_like(pi_t_ref_logp))
+
+    # Guard against low-precision roundoff making selected probability mass > 1.
+    pi_t_mass = pi_t_probs.sum(dim=-1, keepdim=True)
+    pi_t_ref_mass = pi_t_ref_probs.sum(dim=-1, keepdim=True)
+    pi_t_probs = pi_t_probs / torch.maximum(pi_t_mass, torch.ones_like(pi_t_mass))
+    pi_t_ref_probs = pi_t_ref_probs / torch.maximum(pi_t_ref_mass, torch.ones_like(pi_t_ref_mass))
+    pi_t_tail = (1.0 - pi_t_probs.sum(dim=-1, keepdim=True)).clamp_min(0.0)
+    pi_t_ref_tail = (1.0 - pi_t_ref_probs.sum(dim=-1, keepdim=True)).clamp_min(0.0)
+
+    pi_t_dist = torch.cat((pi_t_probs, pi_t_tail), dim=-1)
+    pi_t_ref_dist = torch.cat((pi_t_ref_probs, pi_t_ref_tail), dim=-1)
+    tiny = torch.finfo(pi_t_dist.dtype).tiny
+
+    def kl_divergence(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        terms = source * (source.clamp_min(tiny).log() - target.clamp_min(tiny).log())
+        return torch.where(source > 0, terms, torch.zeros_like(terms)).sum(dim=-1)
+
+    if estimator == "JSD":
+        mixture = 0.5 * (pi_t_dist + pi_t_ref_dist)
+        divergence = 0.5 * kl_divergence(pi_t_dist, mixture) + 0.5 * kl_divergence(pi_t_ref_dist, mixture)
+        divergence = divergence.clamp(max=math.log(2.0))
+    elif estimator == "FKL":
+        divergence = kl_divergence(pi_t_dist, pi_t_ref_dist)
+    else:
+        divergence = kl_divergence(pi_t_ref_dist, pi_t_dist)
+
+    return divergence.clamp_min(0.0).detach()
+
+
 def _compute_topk_js_divergence(
     base_logp: torch.Tensor,
     rl_logp: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute a top-k-plus-tail approximation of token-level JS divergence.
-
-    The two inputs contain normalized full-vocabulary log-probabilities evaluated
-    on the same top-k token ids. All probability mass outside those ids is merged
-    into one tail bucket, producing a valid (K + 1)-class distribution per token.
-    """
-    if base_logp.shape != rl_logp.shape:
-        raise ValueError(
-            "JS log-prob tensors must have the same shape: "
-            f"base_logp={tuple(base_logp.shape)}, rl_logp={tuple(rl_logp.shape)}"
-        )
-    if base_logp.dim() != 3:
-        raise ValueError(f"JS expects [B, T, K] tensors, got {tuple(base_logp.shape)}")
-    if valid_mask is not None and valid_mask.shape != base_logp.shape:
-        raise ValueError(
-            "JS valid_mask must have the same shape as the log-prob tensors: "
-            f"valid_mask={tuple(valid_mask.shape)}, base_logp={tuple(base_logp.shape)}"
-        )
-
-    base_logp = base_logp.detach().float()
-    rl_logp = rl_logp.detach().float()
-    finite_mask = torch.isfinite(base_logp) & torch.isfinite(rl_logp)
-    if valid_mask is not None:
-        finite_mask &= valid_mask.bool()
-
-    base_probs = torch.where(finite_mask, base_logp.exp(), torch.zeros_like(base_logp))
-    rl_probs = torch.where(finite_mask, rl_logp.exp(), torch.zeros_like(rl_logp))
-
-    # Guard against low-precision roundoff making selected probability mass > 1.
-    base_mass = base_probs.sum(dim=-1, keepdim=True)
-    rl_mass = rl_probs.sum(dim=-1, keepdim=True)
-    base_probs = base_probs / torch.maximum(base_mass, torch.ones_like(base_mass))
-    rl_probs = rl_probs / torch.maximum(rl_mass, torch.ones_like(rl_mass))
-    base_tail = (1.0 - base_probs.sum(dim=-1, keepdim=True)).clamp_min(0.0)
-    rl_tail = (1.0 - rl_probs.sum(dim=-1, keepdim=True)).clamp_min(0.0)
-
-    base_dist = torch.cat((base_probs, base_tail), dim=-1)
-    rl_dist = torch.cat((rl_probs, rl_tail), dim=-1)
-    mixture = 0.5 * (base_dist + rl_dist)
-    tiny = torch.finfo(base_dist.dtype).tiny
-
-    def kl_to_mixture(probabilities: torch.Tensor) -> torch.Tensor:
-        terms = probabilities * (
-            probabilities.clamp_min(tiny).log() - mixture.clamp_min(tiny).log()
-        )
-        return torch.where(probabilities > 0, terms, torch.zeros_like(terms)).sum(dim=-1)
-
-    js_divergence = 0.5 * kl_to_mixture(base_dist) + 0.5 * kl_to_mixture(rl_dist)
-    return js_divergence.clamp(min=0.0, max=math.log(2.0)).detach()
+    """Compute legacy JSD with ``rl_logp`` as pi_T and ``base_logp`` as pi_T_ref."""
+    return _compute_topk_divergence(
+        pi_t_logp=rl_logp,
+        pi_t_ref_logp=base_logp,
+        estimator="JSD",
+        valid_mask=valid_mask,
+    )
 
 
 def _build_js_ladder_token_mask(
@@ -830,9 +851,10 @@ class DataParallelPPOActor(BasePPOActor):
             teacher_ref_logp=teacher_ref_logp,
             valid_mask=valid_mask,
         )
-        js_divergence = _compute_topk_js_divergence(
-            base_logp=teacher_ref_logp,
-            rl_logp=teacher_rl_logp,
+        js_divergence = _compute_topk_divergence(
+            pi_t_logp=teacher_rl_logp,
+            pi_t_ref_logp=teacher_ref_logp,
+            estimator=self.config.divergence_estimator,
             valid_mask=valid_mask,
         )
         return DataProto.from_dict(

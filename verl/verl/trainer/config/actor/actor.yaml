@@ -91,6 +91,10 @@ js_ladder_end_percent: 100.0
 # Base seed for reproducible random token selection
 js_token_selection_seed: 42
 
+# Divergence used to rank tokens. Options: JSD, FKL, RKL
+# FKL is KL(pi_T || pi_T_ref); RKL is KL(pi_T_ref || pi_T)
+divergence_estimator: JSD
+
 # Whether to use KL loss instead of KL reward penalty. True for GRPO
 use_kl_loss: false
 

@@ -79,6 +79,7 @@ class ActorConfig(BaseConfig):
         js_ladder_start_percent (float): Lower JS-rank percentile for ladder selection.
         js_ladder_end_percent (float): Upper JS-rank percentile for ladder selection.
         js_token_selection_seed (int): Base seed used by random token selection.
+        divergence_estimator (str): Ranking divergence. Options: 'JSD', 'FKL', or 'RKL'.
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
@@ -119,6 +120,7 @@ class ActorConfig(BaseConfig):
     js_ladder_start_percent: float = 90.0
     js_ladder_end_percent: float = 100.0
     js_token_selection_seed: int = 42
+    divergence_estimator: str = "JSD"
     use_kl_loss: bool = False
     use_torch_compile: bool = True
     kl_loss_coef: float = 2.5
@@ -181,6 +183,12 @@ class ActorConfig(BaseConfig):
             )
         if self.js_token_selection_seed < 0:
             raise ValueError(f"js_token_selection_seed must be non-negative, got {self.js_token_selection_seed}")
+        valid_divergence_estimators = {"JSD", "FKL", "RKL"}
+        if self.divergence_estimator not in valid_divergence_estimators:
+            raise ValueError(
+                "divergence_estimator must be one of "
+                f"{sorted(valid_divergence_estimators)}, got {self.divergence_estimator!r}"
+            )
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""
