@@ -27,6 +27,7 @@ When working with Megatron:
 """
 
 import asyncio
+import copy
 import getpass
 import inspect
 import logging
@@ -91,6 +92,41 @@ from verl.workers.rollout.vllm_rollout.utils import (
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _derive_validation_request_seed(base_seed: int, sample_index: int) -> int:
+    if isinstance(sample_index, (bool, np.bool_)) or not isinstance(sample_index, (int, np.integer)):
+        raise TypeError("validation sample index must be an integer")
+    if sample_index < 0:
+        raise ValueError("validation sample index must be nonnegative")
+    return (int(base_seed) + int(sample_index)) % (2**31)
+
+
+def _build_validation_sampling_params(
+    sampling_params,
+    overrides: dict,
+    sample_indices: np.ndarray,
+    base_seed: int,
+    batch_size: int,
+) -> list:
+    sample_indices = np.asarray(sample_indices)
+    if sample_indices.ndim != 1:
+        raise ValueError("validation sample indices must be one-dimensional")
+    if len(sample_indices) != batch_size:
+        raise ValueError("validation sample indices must match the local batch size")
+    if not np.issubdtype(sample_indices.dtype, np.integer):
+        raise TypeError("validation sample indices must have an integer dtype")
+
+    request_params = []
+    for sample_index in sample_indices:
+        params = copy.copy(sampling_params)
+        for key, value in overrides.items():
+            if hasattr(params, key):
+                setattr(params, key, value)
+        params.seed = _derive_validation_request_seed(base_seed, sample_index)
+        request_params.append(params)
+    return request_params
+
 
 # TODO
 # 1. support pp in vllm
@@ -240,6 +276,9 @@ class vLLMRollout(BaseRollout):
             else:
                 logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
 
+        self.validation_seed = int(config.get("seed", 0))
+        replica_rank = self.device_mesh["dp"].get_local_rank()
+        engine_seed = (self.validation_seed + replica_rank) % (2**31)
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,
@@ -258,7 +297,7 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=config.enable_prefix_caching,
             trust_remote_code=trust_remote_code,
-            seed=config.get("seed", 0),
+            seed=engine_seed,
             **compilation_config,
             **self.lora_kwargs,
             **engine_kwargs,
@@ -410,39 +449,53 @@ class vLLMRollout(BaseRollout):
                 ] * batch_size
 
         # users can customize different sampling_params at different run
-        with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+        validation_sample_indices = non_tensor_batch.get("validation_sample_index")
+        if do_sample and is_validate and validation_sample_indices is not None:
+            sampling_params = _build_validation_sampling_params(
                 sampling_params=self.sampling_params,
+                overrides=kwargs,
+                sample_indices=validation_sample_indices,
+                base_seed=self.validation_seed,
+                batch_size=batch_size,
+            )
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,
+                sampling_params=sampling_params,
                 lora_request=lora_requests,
                 use_tqdm=False,
             )
+        else:
+            with self.update_sampling_params(**kwargs):
+                outputs = self.inference_engine.generate(
+                    prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                    sampling_params=self.sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=False,
+                )
 
-            # TODO(sgm): disable logprob when recompute_log_prob is enable
-            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+        # TODO(sgm): disable logprob when recompute_log_prob is enable
+        # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
-            response = []
-            rollout_log_probs = []
-            for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response_ids = output.outputs[sample_id].token_ids
-                    response.append(response_ids)
-                    if self.config.calculate_log_probs:
-                        curr_log_prob = []
-                        for i, logprob in enumerate(output.outputs[sample_id].logprobs):
-                            curr_log_prob.append(logprob[response_ids[i]].logprob)
-                        rollout_log_probs.append(curr_log_prob)
+        response = []
+        rollout_log_probs = []
+        for output in outputs:
+            for sample_id in range(len(output.outputs)):
+                response_ids = output.outputs[sample_id].token_ids
+                response.append(response_ids)
+                if self.config.calculate_log_probs:
+                    curr_log_prob = []
+                    for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                        curr_log_prob.append(logprob[response_ids[i]].logprob)
+                    rollout_log_probs.append(curr_log_prob)
 
-            response = pad_2d_list_to_length(response, self.pad_token_id, max_length=padding_max_length).to(
+        response = pad_2d_list_to_length(response, self.pad_token_id, max_length=padding_max_length).to(idx.device)
+        if self.config.calculate_log_probs:
+            rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=padding_max_length).to(
                 idx.device
             )
-            if self.config.calculate_log_probs:
-                rollout_log_probs = pad_2d_list_to_length(
-                    rollout_log_probs, -1, max_length=padding_max_length
-                ).to(idx.device)
-                rollout_log_probs = rollout_log_probs.to(torch.float32)
+            rollout_log_probs = rollout_log_probs.to(torch.float32)
 
-            seq = torch.cat([idx, response], dim=-1)
+        seq = torch.cat([idx, response], dim=-1)
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)

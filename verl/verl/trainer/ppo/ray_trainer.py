@@ -77,6 +77,13 @@ def _pop_direct_opd_rollout_options(config) -> dict:
     return options
 
 
+def _build_validation_sample_indices(num_prompts: int, repeat_times: int) -> np.ndarray:
+    """Assign a stable sample index to each prompt repetition."""
+    if num_prompts <= 0 or repeat_times <= 0:
+        raise ValueError("num_prompts and repeat_times must be positive")
+    return np.tile(np.arange(repeat_times, dtype=np.int64), num_prompts)
+
+
 def _build_per_prompt_balanced_indices(num_prompts: int, repeat_times: int, dp_size: int) -> list[int] | None:
     """Build rank-major indices so every rollout DP rank gets the same count per prompt."""
     if num_prompts <= 0 or repeat_times <= 0 or dp_size <= 0:
@@ -942,6 +949,10 @@ class RayPPOTrainer:
             val_repeat_times = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(
                 repeat_times=val_repeat_times, interleave=True
+            )
+            test_batch.non_tensor_batch["validation_sample_index"] = _build_validation_sample_indices(
+                num_prompts=num_prompts,
+                repeat_times=val_repeat_times,
             )
 
             # we only do validation on rule-based rm
