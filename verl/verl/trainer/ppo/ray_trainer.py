@@ -77,6 +77,22 @@ def _pop_direct_opd_rollout_options(config) -> dict:
     return options
 
 
+def _extract_valid_token_divergence_abs(
+    js_divergence: torch.Tensor, response_mask: torch.Tensor
+) -> np.ndarray:
+    if js_divergence.ndim != 2 or response_mask.ndim != 2:
+        raise ValueError(
+            "js_divergence and response_mask must be 2-D [B, T] tensors, "
+            f"got {js_divergence.shape=} and {response_mask.shape=}"
+        )
+    if js_divergence.shape != response_mask.shape:
+        raise ValueError(
+            "js_divergence and response_mask must have the same shape, "
+            f"got {js_divergence.shape=} and {response_mask.shape=}"
+        )
+    return js_divergence.abs()[response_mask.bool()].detach().cpu().numpy()
+
+
 def _build_validation_sample_indices(num_prompts: int, repeat_times: int) -> np.ndarray:
     """Assign a stable sample index to each prompt repetition."""
     if num_prompts <= 0 or repeat_times <= 0:
@@ -2959,6 +2975,14 @@ class RayPPOTrainer:
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
+                if "js_divergence" in batch.batch.keys():
+                    logger.log_histogram(
+                        name="actor/token_divergence_abs_distribution",
+                        values=_extract_valid_token_divergence_abs(
+                            batch.batch["js_divergence"], batch.batch["response_mask"]
+                        ),
+                        step=self.global_steps,
+                    )
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)

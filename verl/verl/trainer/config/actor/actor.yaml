@@ -80,9 +80,14 @@ js_token_filter_enabled: false
 # Per-response fraction of valid token positions retained for actor loss
 js_top_fraction: 0.05
 
-# Token selection mode when JS token filtering is enabled: ladder or random.
-# top_js and bottom_js remain supported as legacy aliases.
-js_token_selection_mode: top_js
+# Token selection mode when divergence token filtering is enabled.
+# relative retains the highest js_top_fraction per response; absolute retains valid
+# tokens whose divergence is >= js_divergence_threshold.
+# top_js, bottom_js, ladder, and random remain supported for compatibility.
+js_token_selection_mode: relative
+
+# Absolute divergence cutoff; valid response tokens with divergence >= this value are retained
+js_divergence_threshold: 0.0
 
 # Lower and upper JS-rank percentiles used by ladder selection
 js_ladder_start_percent: 90.0

@@ -220,6 +220,25 @@ def _build_js_ladder_token_mask(
     return selected_mask
 
 
+def _build_absolute_divergence_token_mask(
+    js_divergence: torch.Tensor,
+    response_mask: torch.Tensor,
+    threshold: float,
+) -> torch.Tensor:
+    """Select valid response positions whose divergence meets an absolute cutoff."""
+    if js_divergence.shape != response_mask.shape:
+        raise ValueError(
+            "js_divergence and response_mask must have the same shape: "
+            f"js_divergence={tuple(js_divergence.shape)}, response_mask={tuple(response_mask.shape)}"
+        )
+    if js_divergence.dim() != 2:
+        raise ValueError(f"Absolute token filtering expects [B, T] tensors, got {tuple(js_divergence.shape)}")
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError(f"threshold must be finite and non-negative, got {threshold}")
+
+    return response_mask.bool() & (js_divergence >= threshold)
+
+
 def _build_random_fraction_token_mask(
     response_mask: torch.Tensor,
     top_fraction: float,
@@ -977,18 +996,18 @@ class DataParallelPPOActor(BasePPOActor):
 
         effective_kl_loss_coef = float(data.meta_info.get("actor_kl_loss_coef", self.config.kl_loss_coef))
         js_token_filter_enabled = bool(self.config.get("js_token_filter_enabled", False))
-        js_token_selection_mode = str(self.config.get("js_token_selection_mode", "top_js"))
+        js_token_selection_mode = str(self.config.get("js_token_selection_mode", "relative"))
         if js_token_filter_enabled and "js_divergence" not in data.batch.keys():
             raise ValueError("JS token filtering is enabled, but js_divergence is missing from the training batch")
         if js_token_filter_enabled:
             response_mask = data.batch["response_mask"]
             js_divergence = data.batch["js_divergence"]
             selection_response_mask = response_mask.to(js_divergence.device)
-            if js_token_selection_mode in {"ladder", "top_js", "bottom_js"}:
+            if js_token_selection_mode in {"relative", "ladder", "top_js", "bottom_js"}:
                 if js_token_selection_mode == "ladder":
                     start_percent = float(self.config.js_ladder_start_percent)
                     end_percent = float(self.config.js_ladder_end_percent)
-                elif js_token_selection_mode == "top_js":
+                elif js_token_selection_mode in {"relative", "top_js"}:
                     end_percent = 100.0
                     start_percent = end_percent - 100.0 * float(self.config.js_top_fraction)
                 else:
@@ -999,6 +1018,12 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask=selection_response_mask,
                     start_percent=start_percent,
                     end_percent=end_percent,
+                )
+            elif js_token_selection_mode == "absolute":
+                js_token_selection_mask = _build_absolute_divergence_token_mask(
+                    js_divergence=js_divergence,
+                    response_mask=selection_response_mask,
+                    threshold=float(self.config.js_divergence_threshold),
                 )
             elif js_token_selection_mode == "random":
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -1031,7 +1056,8 @@ class DataParallelPPOActor(BasePPOActor):
                 )
             else:
                 raise ValueError(
-                    "js_token_selection_mode must be one of ['bottom_js', 'ladder', 'random', 'top_js'], "
+                    "js_token_selection_mode must be one of "
+                    "['absolute', 'bottom_js', 'ladder', 'random', 'relative', 'top_js'], "
                     f"got {js_token_selection_mode!r}"
                 )
             data.batch["js_token_selection_mask"] = js_token_selection_mask

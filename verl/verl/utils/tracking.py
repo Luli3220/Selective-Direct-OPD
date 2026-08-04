@@ -155,6 +155,12 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def log_histogram(self, name, values, step):
+        wandb_logger = self.logger.get("wandb")
+        if wandb_logger is None or values.size == 0:
+            return
+        wandb_logger.log(data={name: wandb_logger.Histogram(values)}, step=step)
+
     def __del__(self):
         if "wandb" in self.logger:
             self.logger["wandb"].finish(exit_code=0)

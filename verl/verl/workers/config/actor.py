@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -74,8 +75,9 @@ class ActorConfig(BaseConfig):
         entropy_coeff (float): Entropy coefficient for regularization.
         js_token_filter_enabled (bool): Whether to filter response-token positions in actor loss.
         js_top_fraction (float): Per-response fraction of valid token positions retained for actor loss.
-        js_token_selection_mode (str): Token selection mode. Options: 'ladder', 'random', plus legacy
-            aliases 'top_js' and 'bottom_js'.
+        js_token_selection_mode (str): Token selection mode. Options: 'relative', 'absolute', 'ladder',
+            'random', plus compatible aliases 'top_js' and 'bottom_js'.
+        js_divergence_threshold (float): Absolute divergence cutoff for retaining valid response tokens.
         js_ladder_start_percent (float): Lower JS-rank percentile for ladder selection.
         js_ladder_end_percent (float): Upper JS-rank percentile for ladder selection.
         js_token_selection_seed (int): Base seed used by random token selection.
@@ -116,7 +118,8 @@ class ActorConfig(BaseConfig):
     entropy_coeff: float = 0
     js_token_filter_enabled: bool = False
     js_top_fraction: float = 0.05
-    js_token_selection_mode: str = "top_js"
+    js_token_selection_mode: str = "relative"
+    js_divergence_threshold: float = 0.0
     js_ladder_start_percent: float = 90.0
     js_ladder_end_percent: float = 100.0
     js_token_selection_seed: int = 42
@@ -169,11 +172,16 @@ class ActorConfig(BaseConfig):
 
         if not 0.0 < self.js_top_fraction <= 1.0:
             raise ValueError(f"js_top_fraction must be in (0, 1], got {self.js_top_fraction}")
-        valid_js_token_selection_modes = {"top_js", "bottom_js", "ladder", "random"}
+        valid_js_token_selection_modes = {"relative", "absolute", "top_js", "bottom_js", "ladder", "random"}
         if self.js_token_selection_mode not in valid_js_token_selection_modes:
             raise ValueError(
                 "js_token_selection_mode must be one of "
                 f"{sorted(valid_js_token_selection_modes)}, got {self.js_token_selection_mode!r}"
+            )
+        if not math.isfinite(self.js_divergence_threshold) or self.js_divergence_threshold < 0.0:
+            raise ValueError(
+                "js_divergence_threshold must be finite and non-negative, "
+                f"got {self.js_divergence_threshold}"
             )
         if not 0.0 <= self.js_ladder_start_percent < self.js_ladder_end_percent <= 100.0:
             raise ValueError(
