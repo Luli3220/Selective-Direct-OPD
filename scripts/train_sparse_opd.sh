@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Generic sparse Direct-OPD training entry point.
-# Rank valid response positions by JS divergence from low to high and select
-# JS_LADDER_SPLIT=START_END, for example 0_10, 40_50, or 90_100.
+# Relative mode retains the highest JS_TOP_FRACTION per response by default.
+# Absolute mode retains valid tokens at or above JS_DIVERGENCE_THRESHOLD.
 
 if [ "${DEBUG:-0}" = "1" ]; then
   set -x
@@ -65,8 +65,11 @@ USE_KL_LOSS=${USE_KL_LOSS:-True}
 ADAPTIVE_KL_LOSS_COEF=${ADAPTIVE_KL_LOSS_COEF:-True}
 JS_TOKEN_FILTER_ENABLED=${JS_TOKEN_FILTER_ENABLED:-True}
 JS_TOP_FRACTION=${JS_TOP_FRACTION:-0.10}
-JS_TOKEN_SELECTION_MODE=${JS_TOKEN_SELECTION_MODE:-ladder}
+JS_TOKEN_SELECTION_MODE=${JS_TOKEN_SELECTION_MODE:-relative}
+JS_DIVERGENCE_THRESHOLD=${JS_DIVERGENCE_THRESHOLD:-0.0}
+DIVERGENCE_PERCENTILE_AREAS=${DIVERGENCE_PERCENTILE_AREAS:-[]}
 JS_TOKEN_SELECTION_SEED=${JS_TOKEN_SELECTION_SEED:-42}
+DIVERGENCE_ESTIMATOR=${DIVERGENCE_ESTIMATOR:-JSD}
 ADAPTIVE_KL_LOSS_REWARD_KEY=${ADAPTIVE_KL_LOSS_REWARD_KEY:-delta_opd/weighted_reward_mean}
 ADAPTIVE_KL_LOSS_EPS=${ADAPTIVE_KL_LOSS_EPS:-0.01}
 ADAPTIVE_KL_LOSS_MIN_COEF=${ADAPTIVE_KL_LOSS_MIN_COEF:-0.5}
@@ -83,8 +86,9 @@ ENABLE_CHUNKED_PREFILL=${ENABLE_CHUNKED_PREFILL:-True}
 ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-True}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NUM_NODES=${NUM_NODES:-1}
-LOGGER=${LOGGER:-"['wandb']"}
-VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
+LOGGER=${LOGGER:-"['console', 'wandb']"}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+VAL_ONLY=${VAL_ONLY:-False}
 LOG_VAL_GENERATIONS=${LOG_VAL_GENERATIONS:-2}
 VAL_N=${VAL_N:-32}
 SAVE_FREQ=${SAVE_FREQ:-20}
@@ -160,9 +164,12 @@ set +e
   actor_rollout_ref.actor.js_token_filter_enabled="${JS_TOKEN_FILTER_ENABLED}" \
   actor_rollout_ref.actor.js_top_fraction="${JS_TOP_FRACTION}" \
   actor_rollout_ref.actor.js_token_selection_mode="${JS_TOKEN_SELECTION_MODE}" \
+  actor_rollout_ref.actor.js_divergence_threshold="${JS_DIVERGENCE_THRESHOLD}" \
   actor_rollout_ref.actor.js_ladder_start_percent="${JS_LADDER_START_PERCENT}" \
   actor_rollout_ref.actor.js_ladder_end_percent="${JS_LADDER_END_PERCENT}" \
+  "actor_rollout_ref.actor.divergence_percentile_areas=${DIVERGENCE_PERCENTILE_AREAS}" \
   actor_rollout_ref.actor.js_token_selection_seed="${JS_TOKEN_SELECTION_SEED}" \
+  actor_rollout_ref.actor.divergence_estimator="${DIVERGENCE_ESTIMATOR}" \
   actor_rollout_ref.actor.adaptive_kl_loss_reward_key="${ADAPTIVE_KL_LOSS_REWARD_KEY}" \
   actor_rollout_ref.actor.adaptive_kl_loss_eps="${ADAPTIVE_KL_LOSS_EPS}" \
   actor_rollout_ref.actor.adaptive_kl_loss_min_coef="${ADAPTIVE_KL_LOSS_MIN_COEF}" \
@@ -222,6 +229,7 @@ set +e
   custom_reward_function.path="${REPO_ROOT}/verl/verl/utils/reward_score/ttrl_math/__init__.py" \
   custom_reward_function.name=reward_func \
   trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
+  trainer.val_only="${VAL_ONLY}" \
   trainer.log_val_generations="${LOG_VAL_GENERATIONS}" \
   trainer.logger="${LOGGER}" \
   trainer.project_name="${PROJECT_NAME}" \
