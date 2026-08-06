@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -76,10 +77,11 @@ class ActorConfig(BaseConfig):
         js_token_filter_enabled (bool): Whether to filter response-token positions in actor loss.
         js_top_fraction (float): Per-response fraction of valid token positions retained for actor loss.
         js_token_selection_mode (str): Token selection mode. Options: 'relative', 'absolute', 'ladder',
-            'random', plus compatible aliases 'top_js' and 'bottom_js'.
+            'percentile_areas', 'random', plus compatible aliases 'top_js' and 'bottom_js'.
         js_divergence_threshold (float): Absolute divergence cutoff for retaining valid response tokens.
-        js_ladder_start_percent (float): Lower JS-rank percentile for ladder selection.
-        js_ladder_end_percent (float): Upper JS-rank percentile for ladder selection.
+        js_ladder_start_percent (float): Lower divergence-rank percentile for ladder selection.
+        js_ladder_end_percent (float): Upper divergence-rank percentile for ladder selection.
+        divergence_percentile_areas (list[list[float]]): Divergence-rank percentile areas to union.
         js_token_selection_seed (int): Base seed used by random token selection.
         divergence_estimator (str): Ranking divergence. Options: 'JSD', 'FKL', or 'RKL'.
         use_kl_loss (bool): Whether to use KL divergence loss.
@@ -122,6 +124,7 @@ class ActorConfig(BaseConfig):
     js_divergence_threshold: float = 0.0
     js_ladder_start_percent: float = 90.0
     js_ladder_end_percent: float = 100.0
+    divergence_percentile_areas: list[list[float]] = field(default_factory=list)
     js_token_selection_seed: int = 42
     divergence_estimator: str = "JSD"
     use_kl_loss: bool = False
@@ -172,7 +175,15 @@ class ActorConfig(BaseConfig):
 
         if not 0.0 < self.js_top_fraction <= 1.0:
             raise ValueError(f"js_top_fraction must be in (0, 1], got {self.js_top_fraction}")
-        valid_js_token_selection_modes = {"relative", "absolute", "top_js", "bottom_js", "ladder", "random"}
+        valid_js_token_selection_modes = {
+            "relative",
+            "absolute",
+            "top_js",
+            "bottom_js",
+            "ladder",
+            "percentile_areas",
+            "random",
+        }
         if self.js_token_selection_mode not in valid_js_token_selection_modes:
             raise ValueError(
                 "js_token_selection_mode must be one of "
@@ -189,6 +200,35 @@ class ActorConfig(BaseConfig):
                 "0 <= js_ladder_start_percent < js_ladder_end_percent <= 100, "
                 f"got start={self.js_ladder_start_percent}, end={self.js_ladder_end_percent}"
             )
+        if self.js_token_selection_mode == "percentile_areas":
+            if not self.divergence_percentile_areas:
+                raise ValueError(
+                    "divergence_percentile_areas must contain at least one area when "
+                    "js_token_selection_mode='percentile_areas'"
+                )
+            for area in self.divergence_percentile_areas:
+                if not isinstance(area, Sequence) or isinstance(area, (str, bytes)) or len(area) != 2:
+                    raise ValueError(
+                        "Each divergence_percentile_areas entry must be a [start, end] pair, "
+                        f"got {area!r}"
+                    )
+                start_percent, end_percent = area
+                try:
+                    valid_area = (
+                        math.isfinite(start_percent)
+                        and math.isfinite(end_percent)
+                        and 0.0 <= start_percent < end_percent <= 100.0
+                    )
+                except TypeError as exc:
+                    raise TypeError(
+                        "divergence_percentile_areas bounds must be finite numbers, "
+                        f"got {area!r}"
+                    ) from exc
+                if not valid_area:
+                    raise ValueError(
+                        "divergence_percentile_areas must satisfy 0 <= start < end <= 100 "
+                        f"with finite bounds, got {area!r}"
+                    )
         if self.js_token_selection_seed < 0:
             raise ValueError(f"js_token_selection_seed must be non-negative, got {self.js_token_selection_seed}")
         valid_divergence_estimators = {"JSD", "FKL", "RKL"}

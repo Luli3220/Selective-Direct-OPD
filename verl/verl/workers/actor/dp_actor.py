@@ -20,6 +20,7 @@ Single Process Actor
 import logging
 import math
 import os
+from collections.abc import Sequence
 
 import torch
 from torch import nn
@@ -42,6 +43,7 @@ from verl.workers.config import ActorConfig
 
 __all__ = [
     "DataParallelPPOActor",
+    "_build_divergence_percentile_areas_token_mask",
     "_build_js_ladder_token_mask",
     "_build_random_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
@@ -217,6 +219,42 @@ def _build_js_ladder_token_mask(
         sorted_local_indices = torch.argsort(local_scores, stable=True)
         selected_local_indices = sorted_local_indices[start_index : start_index + keep_count]
         selected_mask[batch_index, valid_indices[selected_local_indices]] = True
+    return selected_mask
+
+
+def _build_divergence_percentile_areas_token_mask(
+    divergence: torch.Tensor,
+    response_mask: torch.Tensor,
+    percentile_areas: list[list[float]],
+) -> torch.Tensor:
+    """Union divergence-ranked percentile areas independently within each response."""
+    if not percentile_areas:
+        raise ValueError("percentile_areas must contain at least one area")
+
+    selected_mask = torch.zeros_like(response_mask, dtype=torch.bool)
+    for area in percentile_areas:
+        if not isinstance(area, Sequence) or isinstance(area, (str, bytes)) or len(area) != 2:
+            raise ValueError(f"Each percentile area must be a [start, end] pair, got {area!r}")
+        start_percent, end_percent = area
+        try:
+            valid_area = (
+                math.isfinite(start_percent)
+                and math.isfinite(end_percent)
+                and 0.0 <= start_percent < end_percent <= 100.0
+            )
+        except TypeError as exc:
+            raise TypeError(f"Percentile area bounds must be finite numbers, got {area!r}") from exc
+        if not valid_area:
+            raise ValueError(
+                "Percentile areas must satisfy 0 <= start < end <= 100 with finite bounds, "
+                f"got {area!r}"
+            )
+        selected_mask |= _build_js_ladder_token_mask(
+            js_divergence=divergence,
+            response_mask=response_mask,
+            start_percent=start_percent,
+            end_percent=end_percent,
+        )
     return selected_mask
 
 
@@ -1019,6 +1057,12 @@ class DataParallelPPOActor(BasePPOActor):
                     start_percent=start_percent,
                     end_percent=end_percent,
                 )
+            elif js_token_selection_mode == "percentile_areas":
+                js_token_selection_mask = _build_divergence_percentile_areas_token_mask(
+                    divergence=js_divergence,
+                    response_mask=selection_response_mask,
+                    percentile_areas=self.config.divergence_percentile_areas,
+                )
             elif js_token_selection_mode == "absolute":
                 js_token_selection_mask = _build_absolute_divergence_token_mask(
                     js_divergence=js_divergence,
@@ -1057,7 +1101,7 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 raise ValueError(
                     "js_token_selection_mode must be one of "
-                    "['absolute', 'bottom_js', 'ladder', 'random', 'relative', 'top_js'], "
+                    "['absolute', 'bottom_js', 'ladder', 'percentile_areas', 'random', 'relative', 'top_js'], "
                     f"got {js_token_selection_mode!r}"
                 )
             data.batch["js_token_selection_mask"] = js_token_selection_mask

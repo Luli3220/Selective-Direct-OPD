@@ -81,17 +81,24 @@ js_token_filter_enabled: false
 js_top_fraction: 0.05
 
 # Token selection mode when divergence token filtering is enabled.
-# relative retains the highest js_top_fraction per response; absolute retains valid
-# tokens whose divergence is >= js_divergence_threshold.
-# top_js, bottom_js, ladder, and random remain supported for compatibility.
+# relative/top_js and bottom_js use js_top_fraction; ladder uses js_ladder_start_percent
+# and js_ladder_end_percent; percentile_areas uses divergence_percentile_areas;
+# absolute uses js_divergence_threshold; random uses js_top_fraction and js_token_selection_seed.
+# Selector settings for other modes are ignored during mask construction.
 js_token_selection_mode: relative
 
 # Absolute divergence cutoff; valid response tokens with divergence >= this value are retained
 js_divergence_threshold: 0.0
 
-# Lower and upper JS-rank percentiles used by ladder selection
+# Lower and upper divergence-rank percentiles used by ladder selection
 js_ladder_start_percent: 90.0
 js_ladder_end_percent: 100.0
+
+# Half-open divergence-rank percentile areas unioned by percentile_areas selection
+# Example: [[0, 10], [90, 100]] retains the bottom and top 10 percent per response
+# Areas may be unordered or overlapping; each area preserves ladder rounding behavior
+# This setting is ignored unless js_token_selection_mode is percentile_areas
+divergence_percentile_areas: []
 
 # Base seed for reproducible random token selection
 js_token_selection_seed: 42

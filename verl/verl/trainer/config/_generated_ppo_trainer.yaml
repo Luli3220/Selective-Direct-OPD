@@ -69,6 +69,7 @@ actor_rollout_ref:
     js_divergence_threshold: 0.0
     js_ladder_start_percent: 90.0
     js_ladder_end_percent: 100.0
+    divergence_percentile_areas: []
     js_token_selection_seed: 42
     divergence_estimator: JSD
     use_kl_loss: false
