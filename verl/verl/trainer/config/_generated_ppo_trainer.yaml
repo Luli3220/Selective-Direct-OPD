@@ -66,6 +66,7 @@ actor_rollout_ref:
     js_token_filter_enabled: false
     js_top_fraction: 0.05
     js_token_selection_mode: relative
+    js_token_selection_aggregation: response-agg
     js_divergence_threshold: 0.0
     js_ladder_start_percent: 90.0
     js_ladder_end_percent: 100.0

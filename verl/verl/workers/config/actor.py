@@ -75,9 +75,11 @@ class ActorConfig(BaseConfig):
         loss_agg_mode (str): Loss aggregation mode. Options: 'token-mean', 'sample-mean'.
         entropy_coeff (float): Entropy coefficient for regularization.
         js_token_filter_enabled (bool): Whether to filter response-token positions in actor loss.
-        js_top_fraction (float): Per-response fraction of valid token positions retained for actor loss.
+        js_top_fraction (float): Fraction of valid token positions retained within the configured ranking scope.
         js_token_selection_mode (str): Token selection mode. Options: 'relative', 'absolute', 'ladder',
             'percentile_areas', 'random', plus compatible aliases 'top_js' and 'bottom_js'.
+        js_token_selection_aggregation (str): Ranking scope. 'response-agg' ranks within each response;
+            'batch-agg' pools all valid states in each PPO mini-batch.
         js_divergence_threshold (float): Absolute divergence cutoff for retaining valid response tokens.
         js_ladder_start_percent (float): Lower divergence-rank percentile for ladder selection.
         js_ladder_end_percent (float): Upper divergence-rank percentile for ladder selection.
@@ -121,6 +123,7 @@ class ActorConfig(BaseConfig):
     js_token_filter_enabled: bool = False
     js_top_fraction: float = 0.05
     js_token_selection_mode: str = "relative"
+    js_token_selection_aggregation: str = "response-agg"
     js_divergence_threshold: float = 0.0
     js_ladder_start_percent: float = 90.0
     js_ladder_end_percent: float = 100.0
@@ -188,6 +191,13 @@ class ActorConfig(BaseConfig):
             raise ValueError(
                 "js_token_selection_mode must be one of "
                 f"{sorted(valid_js_token_selection_modes)}, got {self.js_token_selection_mode!r}"
+            )
+        valid_js_token_selection_aggregations = {"batch-agg", "response-agg"}
+        if self.js_token_selection_aggregation not in valid_js_token_selection_aggregations:
+            raise ValueError(
+                "js_token_selection_aggregation must be one of "
+                f"{sorted(valid_js_token_selection_aggregations)}, "
+                f"got {self.js_token_selection_aggregation!r}"
             )
         if not math.isfinite(self.js_divergence_threshold) or self.js_divergence_threshold < 0.0:
             raise ValueError(

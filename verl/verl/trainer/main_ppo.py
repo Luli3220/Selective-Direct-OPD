@@ -22,7 +22,7 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.dataset.sampler import AbstractSampler
+from verl.experimental.dataset.sampler import AbstractSampler, SequentialOffsetSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
@@ -417,7 +417,13 @@ def create_rl_sampler(data_config, dataset):
     import torch
     from torch.utils.data import RandomSampler, SequentialSampler
 
+    prompt_offset = int(data_config.get("train_prompt_offset", 0))
+    if prompt_offset and data_config.shuffle:
+        raise ValueError("data.train_prompt_offset requires data.shuffle=False so prompt skipping is deterministic")
+
     if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
+        if prompt_offset:
+            raise ValueError("data.train_prompt_offset cannot be combined with a custom data sampler")
         curriculum_class = load_extern_type(
             data_config.sampler.class_path,
             data_config.sampler.class_name,
@@ -441,6 +447,11 @@ def create_rl_sampler(data_config, dataset):
         if seed is not None:
             train_dataloader_generator.manual_seed(seed)
         sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
+    elif prompt_offset:
+        # The offset applies after dataset loading and overlong-prompt filtering,
+        # i.e. to the exact sequence consumed by the training dataloader.
+        sampler = SequentialOffsetSampler(data_source=dataset, offset=prompt_offset)
+        print(f"Skipping the first {prompt_offset} training prompts; {len(sampler)} prompts remain")
     else:
         # If shuffling is disabled, use a sequential sampler to iterate through the dataset in order.
         sampler = SequentialSampler(data_source=dataset)

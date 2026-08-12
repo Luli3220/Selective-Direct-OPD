@@ -77,7 +77,7 @@ entropy_coeff: 0
 # Whether to filter response-token positions in the actor loss
 js_token_filter_enabled: false
 
-# Per-response fraction of valid token positions retained for actor loss
+# Fraction of valid token positions retained within the configured ranking scope
 js_top_fraction: 0.05
 
 # Token selection mode when divergence token filtering is enabled.
@@ -86,6 +86,11 @@ js_top_fraction: 0.05
 # absolute uses js_divergence_threshold; random uses js_top_fraction and js_token_selection_seed.
 # Selector settings for other modes are ignored during mask construction.
 js_token_selection_mode: relative
+
+# Ranking scope for relative/top_js/bottom_js/ladder/percentile_areas modes.
+# response-agg ranks valid states independently per response (legacy behavior).
+# batch-agg pools all valid states in each PPO mini-batch, with no per-response quota.
+js_token_selection_aggregation: response-agg
 
 # Absolute divergence cutoff; valid response tokens with divergence >= this value are retained
 js_divergence_threshold: 0.0

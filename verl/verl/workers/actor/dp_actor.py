@@ -45,6 +45,7 @@ __all__ = [
     "DataParallelPPOActor",
     "_build_divergence_percentile_areas_token_mask",
     "_build_js_ladder_token_mask",
+    "_build_pooled_batch_js_ladder_token_mask",
     "_build_random_fraction_token_mask",
     "_compute_delta_opd_rm_scores",
     "_compute_topk_divergence",
@@ -222,16 +223,72 @@ def _build_js_ladder_token_mask(
     return selected_mask
 
 
+def _build_pooled_batch_js_ladder_token_mask(
+    js_divergence: torch.Tensor,
+    response_mask: torch.Tensor,
+    start_percent: float,
+    end_percent: float,
+) -> torch.Tensor:
+    """Select a JS-ranked percentile interval pooled across one mini-batch.
+
+    Unlike :func:`_build_js_ladder_token_mask`, every valid state in ``[B, T]``
+    competes in one ranking. Responses therefore receive no individual quota.
+    """
+    if js_divergence.shape != response_mask.shape:
+        raise ValueError(
+            "js_divergence and response_mask must have the same shape: "
+            f"js_divergence={tuple(js_divergence.shape)}, response_mask={tuple(response_mask.shape)}"
+        )
+    if js_divergence.dim() != 2:
+        raise ValueError(f"Pooled JS token filtering expects [B, T] tensors, got {tuple(js_divergence.shape)}")
+    if not 0.0 <= start_percent < end_percent <= 100.0:
+        raise ValueError(
+            "JS ladder bounds must satisfy 0 <= start_percent < end_percent <= 100, "
+            f"got start_percent={start_percent}, end_percent={end_percent}"
+        )
+
+    valid_mask = response_mask.bool()
+    selected_mask = torch.zeros_like(valid_mask)
+    flat_valid_indices = torch.nonzero(valid_mask.flatten(), as_tuple=False).squeeze(-1)
+    if flat_valid_indices.numel() == 0:
+        return selected_mask
+
+    valid_count = flat_valid_indices.numel()
+    interval_fraction = (end_percent - start_percent) / 100.0
+    keep_count = max(1, math.ceil(valid_count * interval_fraction))
+    start_index = math.floor(valid_count * start_percent / 100.0)
+    start_index = min(start_index, valid_count - keep_count)
+
+    flat_scores = js_divergence.detach().float().flatten()
+    valid_scores = flat_scores[flat_valid_indices]
+    sorted_valid_indices = torch.argsort(valid_scores, stable=True)
+    selected_valid_indices = sorted_valid_indices[start_index : start_index + keep_count]
+    flat_selected_mask = selected_mask.view(-1)
+    flat_selected_mask[flat_valid_indices[selected_valid_indices]] = True
+    return selected_mask
+
+
 def _build_divergence_percentile_areas_token_mask(
     divergence: torch.Tensor,
     response_mask: torch.Tensor,
     percentile_areas: list[list[float]],
+    aggregation: str = "response-agg",
 ) -> torch.Tensor:
-    """Union divergence-ranked percentile areas independently within each response."""
+    """Union divergence-ranked percentile areas under the requested aggregation scope."""
     if not percentile_areas:
         raise ValueError("percentile_areas must contain at least one area")
+    if aggregation not in {"batch-agg", "response-agg"}:
+        raise ValueError(
+            "aggregation must be one of ['batch-agg', 'response-agg'], "
+            f"got {aggregation!r}"
+        )
 
     selected_mask = torch.zeros_like(response_mask, dtype=torch.bool)
+    mask_builder = (
+        _build_pooled_batch_js_ladder_token_mask
+        if aggregation == "batch-agg"
+        else _build_js_ladder_token_mask
+    )
     for area in percentile_areas:
         if not isinstance(area, Sequence) or isinstance(area, (str, bytes)) or len(area) != 2:
             raise ValueError(f"Each percentile area must be a [start, end] pair, got {area!r}")
@@ -249,7 +306,7 @@ def _build_divergence_percentile_areas_token_mask(
                 "Percentile areas must satisfy 0 <= start < end <= 100 with finite bounds, "
                 f"got {area!r}"
             )
-        selected_mask |= _build_js_ladder_token_mask(
+        selected_mask |= mask_builder(
             js_divergence=divergence,
             response_mask=response_mask,
             start_percent=start_percent,
@@ -1035,13 +1092,26 @@ class DataParallelPPOActor(BasePPOActor):
         effective_kl_loss_coef = float(data.meta_info.get("actor_kl_loss_coef", self.config.kl_loss_coef))
         js_token_filter_enabled = bool(self.config.get("js_token_filter_enabled", False))
         js_token_selection_mode = str(self.config.get("js_token_selection_mode", "relative"))
+        js_token_selection_aggregation = str(
+            self.config.get("js_token_selection_aggregation", "response-agg")
+        )
         if js_token_filter_enabled and "js_divergence" not in data.batch.keys():
             raise ValueError("JS token filtering is enabled, but js_divergence is missing from the training batch")
         if js_token_filter_enabled:
             response_mask = data.batch["response_mask"]
             js_divergence = data.batch["js_divergence"]
             selection_response_mask = response_mask.to(js_divergence.device)
-            if js_token_selection_mode in {"relative", "ladder", "top_js", "bottom_js"}:
+            if js_token_selection_aggregation == "batch-agg" and "js_token_selection_mask" in data.batch.keys():
+                js_token_selection_mask = data.batch["js_token_selection_mask"].to(js_divergence.device).bool()
+                if js_token_selection_mask.shape != selection_response_mask.shape:
+                    raise ValueError(
+                        "Precomputed js_token_selection_mask and response_mask must have the same shape: "
+                        f"selection_mask={tuple(js_token_selection_mask.shape)}, "
+                        f"response_mask={tuple(selection_response_mask.shape)}"
+                    )
+                if js_token_selection_mask[~selection_response_mask.bool()].any():
+                    raise ValueError("Precomputed js_token_selection_mask cannot select padded response positions")
+            elif js_token_selection_mode in {"relative", "ladder", "top_js", "bottom_js"}:
                 if js_token_selection_mode == "ladder":
                     start_percent = float(self.config.js_ladder_start_percent)
                     end_percent = float(self.config.js_ladder_end_percent)
@@ -1051,18 +1121,46 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     start_percent = 0.0
                     end_percent = 100.0 * float(self.config.js_top_fraction)
-                js_token_selection_mask = _build_js_ladder_token_mask(
-                    js_divergence=js_divergence,
-                    response_mask=selection_response_mask,
-                    start_percent=start_percent,
-                    end_percent=end_percent,
-                )
+                if js_token_selection_aggregation == "response-agg":
+                    js_token_selection_mask = _build_js_ladder_token_mask(
+                        js_divergence=js_divergence,
+                        response_mask=selection_response_mask,
+                        start_percent=start_percent,
+                        end_percent=end_percent,
+                    )
+                else:
+                    js_token_selection_mask = torch.zeros_like(selection_response_mask, dtype=torch.bool)
+                    mini_batch_size = int(self.config.ppo_mini_batch_size)
+                    for batch_start in range(0, js_divergence.shape[0], mini_batch_size):
+                        batch_end = min(batch_start + mini_batch_size, js_divergence.shape[0])
+                        js_token_selection_mask[batch_start:batch_end] = (
+                            _build_pooled_batch_js_ladder_token_mask(
+                                js_divergence=js_divergence[batch_start:batch_end],
+                                response_mask=selection_response_mask[batch_start:batch_end],
+                                start_percent=start_percent,
+                                end_percent=end_percent,
+                            )
+                        )
             elif js_token_selection_mode == "percentile_areas":
-                js_token_selection_mask = _build_divergence_percentile_areas_token_mask(
-                    divergence=js_divergence,
-                    response_mask=selection_response_mask,
-                    percentile_areas=self.config.divergence_percentile_areas,
-                )
+                if js_token_selection_aggregation == "response-agg":
+                    js_token_selection_mask = _build_divergence_percentile_areas_token_mask(
+                        divergence=js_divergence,
+                        response_mask=selection_response_mask,
+                        percentile_areas=self.config.divergence_percentile_areas,
+                    )
+                else:
+                    js_token_selection_mask = torch.zeros_like(selection_response_mask, dtype=torch.bool)
+                    mini_batch_size = int(self.config.ppo_mini_batch_size)
+                    for batch_start in range(0, js_divergence.shape[0], mini_batch_size):
+                        batch_end = min(batch_start + mini_batch_size, js_divergence.shape[0])
+                        js_token_selection_mask[batch_start:batch_end] = (
+                            _build_divergence_percentile_areas_token_mask(
+                                divergence=js_divergence[batch_start:batch_end],
+                                response_mask=selection_response_mask[batch_start:batch_end],
+                                percentile_areas=self.config.divergence_percentile_areas,
+                                aggregation="batch-agg",
+                            )
+                        )
             elif js_token_selection_mode == "absolute":
                 js_token_selection_mask = _build_absolute_divergence_token_mask(
                     js_divergence=js_divergence,

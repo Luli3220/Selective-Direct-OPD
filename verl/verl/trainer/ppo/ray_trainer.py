@@ -66,6 +66,10 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.utils.fs import copy_to_local, is_non_local
 from verl.utils import hdfs_io
+from verl.workers.actor.dp_actor import (
+    _build_divergence_percentile_areas_token_mask,
+    _build_pooled_batch_js_ladder_token_mask,
+)
 
 
 def _pop_direct_opd_rollout_options(config) -> dict:
@@ -91,6 +95,90 @@ def _extract_valid_token_divergence_abs(
             f"got {js_divergence.shape=} and {response_mask.shape=}"
         )
     return js_divergence.abs()[response_mask.bool()].detach().cpu().numpy()
+
+
+def _build_batch_aggregated_js_token_mask(
+    js_divergence: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    selection_mode: str,
+    top_fraction: float,
+    ladder_start_percent: float,
+    ladder_end_percent: float,
+    percentile_areas: list[list[float]],
+    global_mini_batch_size: int,
+    data_parallel_size: int,
+) -> torch.Tensor:
+    """Build pooled masks for the global mini-batches represented in a rank-major batch."""
+    if js_divergence.shape != response_mask.shape or js_divergence.ndim != 2:
+        raise ValueError(
+            "js_divergence and response_mask must have the same [B, T] shape, "
+            f"got {tuple(js_divergence.shape)} and {tuple(response_mask.shape)}"
+        )
+    if global_mini_batch_size <= 0 or data_parallel_size <= 0:
+        raise ValueError("global_mini_batch_size and data_parallel_size must be positive")
+    if js_divergence.shape[0] % data_parallel_size != 0:
+        raise ValueError(
+            f"Batch size {js_divergence.shape[0]} must be divisible by data_parallel_size {data_parallel_size}"
+        )
+    if global_mini_batch_size % data_parallel_size != 0:
+        raise ValueError(
+            f"global_mini_batch_size {global_mini_batch_size} must be divisible by "
+            f"data_parallel_size {data_parallel_size}"
+        )
+
+    response_mask = response_mask.to(js_divergence.device)
+
+    if selection_mode == "ladder":
+        start_percent = ladder_start_percent
+        end_percent = ladder_end_percent
+    elif selection_mode in {"relative", "top_js"}:
+        start_percent = 100.0 - 100.0 * top_fraction
+        end_percent = 100.0
+    elif selection_mode == "bottom_js":
+        start_percent = 0.0
+        end_percent = 100.0 * top_fraction
+    elif selection_mode != "percentile_areas":
+        raise ValueError(
+            "batch-agg is supported for divergence-ranked modes "
+            "['bottom_js', 'ladder', 'percentile_areas', 'relative', 'top_js'], "
+            f"got {selection_mode!r}"
+        )
+
+    selected_mask = torch.zeros_like(response_mask, dtype=torch.bool)
+    local_batch_size = js_divergence.shape[0] // data_parallel_size
+    local_mini_batch_size = global_mini_batch_size // data_parallel_size
+    index_device = js_divergence.device
+    for local_start in range(0, local_batch_size, local_mini_batch_size):
+        local_end = min(local_start + local_mini_batch_size, local_batch_size)
+        mini_batch_indices = torch.cat(
+            [
+                torch.arange(
+                    rank * local_batch_size + local_start,
+                    rank * local_batch_size + local_end,
+                    device=index_device,
+                )
+                for rank in range(data_parallel_size)
+            ]
+        )
+        mini_batch_divergence = js_divergence[mini_batch_indices]
+        mini_batch_response_mask = response_mask[mini_batch_indices]
+        if selection_mode == "percentile_areas":
+            mini_batch_selection = _build_divergence_percentile_areas_token_mask(
+                divergence=mini_batch_divergence,
+                response_mask=mini_batch_response_mask,
+                percentile_areas=percentile_areas,
+                aggregation="batch-agg",
+            )
+        else:
+            mini_batch_selection = _build_pooled_batch_js_ladder_token_mask(
+                js_divergence=mini_batch_divergence,
+                response_mask=mini_batch_response_mask,
+                start_percent=start_percent,
+                end_percent=end_percent,
+            )
+        selected_mask[mini_batch_indices] = mini_batch_selection
+    return selected_mask
 
 
 def _build_validation_sample_indices(num_prompts: int, repeat_times: int) -> np.ndarray:
@@ -2896,6 +2984,45 @@ class RayPPOTrainer:
                                     metrics["actor/adaptive_kl_coef_after"] = new_kl_coef
                                 else:
                                     metrics["actor/adaptive_kl_loss_missing_reward"] = 1
+                            ranked_selection_modes = {
+                                "bottom_js",
+                                "ladder",
+                                "percentile_areas",
+                                "relative",
+                                "top_js",
+                            }
+                            if (
+                                actor_config.get("js_token_filter_enabled", False)
+                                and actor_config.get("js_token_selection_aggregation", "response-agg")
+                                == "batch-agg"
+                                and actor_config.get("js_token_selection_mode", "relative")
+                                in ranked_selection_modes
+                            ):
+                                sequence_parallel_size = int(
+                                    actor_config.get("ulysses_sequence_parallel_size", 1)
+                                )
+                                if self.actor_rollout_wg.world_size % sequence_parallel_size != 0:
+                                    raise ValueError(
+                                        f"Actor world size {self.actor_rollout_wg.world_size} must be divisible by "
+                                        f"sequence parallel size {sequence_parallel_size}"
+                                    )
+                                data_parallel_size = self.actor_rollout_wg.world_size // sequence_parallel_size
+                                global_mini_batch_size = int(actor_config.ppo_mini_batch_size) * int(
+                                    self.config.actor_rollout_ref.rollout.n
+                                )
+                                batch.batch["js_token_selection_mask"] = (
+                                    _build_batch_aggregated_js_token_mask(
+                                        js_divergence=batch.batch["js_divergence"],
+                                        response_mask=batch.batch["response_mask"],
+                                        selection_mode=str(actor_config.js_token_selection_mode),
+                                        top_fraction=float(actor_config.js_top_fraction),
+                                        ladder_start_percent=float(actor_config.js_ladder_start_percent),
+                                        ladder_end_percent=float(actor_config.js_ladder_end_percent),
+                                        percentile_areas=actor_config.divergence_percentile_areas,
+                                        global_mini_batch_size=global_mini_batch_size,
+                                        data_parallel_size=data_parallel_size,
+                                    )
+                                )
                             batch.meta_info["actor_kl_loss_coef"] = float(actor_config.kl_loss_coef)
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])

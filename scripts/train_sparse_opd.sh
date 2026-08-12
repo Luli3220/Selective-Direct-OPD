@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Generic sparse Direct-OPD training entry point.
-# Relative mode retains the highest JS_TOP_FRACTION per response by default.
+# Relative mode retains the highest JS_TOP_FRACTION using JS_TOKEN_SELECTION_AGGREGATION.
 # Absolute mode retains valid tokens at or above JS_DIVERGENCE_THRESHOLD.
 
 if [ "${DEBUG:-0}" = "1" ]; then
@@ -66,6 +66,7 @@ ADAPTIVE_KL_LOSS_COEF=${ADAPTIVE_KL_LOSS_COEF:-True}
 JS_TOKEN_FILTER_ENABLED=${JS_TOKEN_FILTER_ENABLED:-True}
 JS_TOP_FRACTION=${JS_TOP_FRACTION:-0.10}
 JS_TOKEN_SELECTION_MODE=${JS_TOKEN_SELECTION_MODE:-relative}
+JS_TOKEN_SELECTION_AGGREGATION=${JS_TOKEN_SELECTION_AGGREGATION:-response-agg}
 JS_DIVERGENCE_THRESHOLD=${JS_DIVERGENCE_THRESHOLD:-0.0}
 DIVERGENCE_PERCENTILE_AREAS=${DIVERGENCE_PERCENTILE_AREAS:-[]}
 JS_TOKEN_SELECTION_SEED=${JS_TOKEN_SELECTION_SEED:-42}
@@ -164,6 +165,7 @@ set +e
   actor_rollout_ref.actor.js_token_filter_enabled="${JS_TOKEN_FILTER_ENABLED}" \
   actor_rollout_ref.actor.js_top_fraction="${JS_TOP_FRACTION}" \
   actor_rollout_ref.actor.js_token_selection_mode="${JS_TOKEN_SELECTION_MODE}" \
+  actor_rollout_ref.actor.js_token_selection_aggregation="${JS_TOKEN_SELECTION_AGGREGATION}" \
   actor_rollout_ref.actor.js_divergence_threshold="${JS_DIVERGENCE_THRESHOLD}" \
   actor_rollout_ref.actor.js_ladder_start_percent="${JS_LADDER_START_PERCENT}" \
   actor_rollout_ref.actor.js_ladder_end_percent="${JS_LADDER_END_PERCENT}" \
