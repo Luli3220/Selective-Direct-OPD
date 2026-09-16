@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Main selective-direct-opd training entry point.
+# Main S2D-OPD training entry point.
 # Relative mode retains the highest JS_TOP_FRACTION using JS_TOKEN_SELECTION_AGGREGATION.
 # Absolute mode retains valid tokens at or above JS_DIVERGENCE_THRESHOLD.
 
@@ -34,7 +34,7 @@ DATA_ROOT=${DATA_ROOT:-"${REPO_ROOT}/datasets"}
 OUTPUT_ROOT=${OUTPUT_ROOT:-checkpoints}
 LOG_ROOT=${LOG_ROOT:-logs}
 
-PROJECT_NAME=${PROJECT_NAME:-selective-direct-opd}
+PROJECT_NAME=${PROJECT_NAME:-s2d-opd}
 JS_LADDER_SPLIT=${JS_LADDER_SPLIT:-90_100}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-justrl_qwen3_1p7b_js_${JS_LADDER_SPLIT}_kl}
 ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-"${MODEL_ROOT}/Qwen3-1.7B"}

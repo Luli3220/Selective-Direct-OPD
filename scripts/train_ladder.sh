@@ -47,4 +47,4 @@ export VAL_N=${VAL_N:-32}
 export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.75}
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 
-exec bash "${SCRIPT_DIR}/train_selective_direct_opd.sh"
+exec bash "${SCRIPT_DIR}/train_s2d_opd.sh"

@@ -1,14 +1,14 @@
 # Not Every Token Is Worth Distilling: Selective Supervision for Direct-OPD
 
-This repository contains the official code release for **Selective-Direct-OPD**.
+This repository contains the official code release for **<u>S</u>elective <u>S</u>upervision for <u>D</u>irect-OPD** ($S^2$D-OPD).
 
 ## Quick Start
 
 Install dependencies:
 
 ```bash
-conda create -n selective-opd python=3.12 -y
-conda activate selective-opd
+conda create -n s2d-opd python=3.12 -y
+conda activate s2d-opd
 
 cd verl
 USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
@@ -29,7 +29,7 @@ See the [setup guide](docs/setup.md) for data preparation, paths, and launch opt
 ├── docs/setup.md                         # Detailed setup instructions
 ├── eval/                                 # Validation and held-out datasets
 ├── scripts/
-│   ├── train_selective_direct_opd.sh       # Configurable training entry point
+│   ├── train_s2d_opd.sh                    # Configurable training entry point
 │   ├── eval.sh                             # Validation-only evaluation entry point
 │   ├── prepare_skywork_math.py             # Training-data converter
 │   ├── train_ladder.sh                     # Select a divergence percentile interval
@@ -52,7 +52,7 @@ See the [setup guide](docs/setup.md) for data preparation, paths, and launch opt
         └── model_merger/                  # Checkpoint export implementation
 ```
 
-The token-selection implementation is in [`verl/verl/workers/actor/dp_actor.py`](verl/verl/workers/actor/dp_actor.py). Experiment settings and environment-variable overrides are defined in [`scripts/train_selective_direct_opd.sh`](scripts/train_selective_direct_opd.sh).
+The token-selection implementation is in [`verl/verl/workers/actor/dp_actor.py`](verl/verl/workers/actor/dp_actor.py). Experiment settings and environment-variable overrides are defined in [`scripts/train_s2d_opd.sh`](scripts/train_s2d_opd.sh).
 
 ## Models and data
 
@@ -118,8 +118,8 @@ Choose one experiment per run. For a custom relative-selection experiment:
 ```bash
 JS_TOKEN_SELECTION_MODE=relative \
 JS_TOP_FRACTION=0.10 \
-EXPERIMENT_NAME=selective_relative_top10 \
-bash scripts/train_selective_direct_opd.sh
+EXPERIMENT_NAME=s2d_opd_relative_top10 \
+bash scripts/train_s2d_opd.sh
 ```
 
 The scripts otherwise default to console and W&B logging. The console-only override above keeps experiment logs local. By default, `MANAGE_RAY=True` stops existing local Ray processes and starts a local Ray head; use a dedicated training machine or set `MANAGE_RAY=False` when using an already configured Ray runtime.

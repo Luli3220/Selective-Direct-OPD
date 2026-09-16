@@ -1,12 +1,12 @@
 # Setup
 
-This repository includes the Selective-Direct-OPD training code and processed evaluation datasets. Model weights and the main training parquet must be downloaded separately.
+This repository includes the **<u>S</u>elective <u>S</u>upervision for <u>D</u>irect-OPD** ($S^2$D-OPD) training code and processed evaluation datasets. Model weights and the main training parquet must be downloaded separately.
 
 ## Environment
 
 ```bash
-conda create -n selective-opd python=3.12 -y
-conda activate selective-opd
+conda create -n s2d-opd python=3.12 -y
+conda activate s2d-opd
 
 cd verl
 USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
@@ -66,7 +66,7 @@ The converter applies the DAPO-style prompt used by Direct-OPD and validates the
 Launch the default selective training configuration:
 
 ```bash
-bash scripts/train_selective_direct_opd.sh
+bash scripts/train_s2d_opd.sh
 ```
 
 The repository also provides launchers for the top-10%, bottom-10%, random-token, and percentile-interval experiments under `scripts/`.
@@ -78,7 +78,7 @@ MODEL_ROOT=/path/to/models \
 DATA_ROOT=/path/to/datasets \
 OUTPUT_ROOT=/path/to/checkpoints \
 LOG_ROOT=/path/to/logs \
-bash scripts/train_selective_direct_opd.sh
+bash scripts/train_s2d_opd.sh
 ```
 
 Common overrides:
@@ -91,7 +91,7 @@ TRAIN_DATASET=/path/to/train.parquet \
 TOTAL_TRAINING_STEPS=300 \
 GPUS_PER_NODE=8 \
 NUM_NODES=1 \
-bash scripts/train_selective_direct_opd.sh
+bash scripts/train_s2d_opd.sh
 ```
 
 AIME24 and AIME25 are used as validation sets during training. Checkpoints are saved under `${OUTPUT_ROOT}/${EXPERIMENT_NAME}`, and validation generations are written under `${CHECKPOINT_DIR}/outputs/validation_log/`.

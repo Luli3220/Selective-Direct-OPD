@@ -23,6 +23,6 @@ export VAL_ONLY=True
 export REWARD_MODEL_ENABLE=False
 export TEACHER_REF_REWARD_MODEL_ENABLE=False
 export LOGGER=${LOGGER:-"['console']"}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-selective_direct_opd_eval}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-s2d_opd_eval}
 
-exec bash "${SCRIPT_DIR}/train_selective_direct_opd.sh"
+exec bash "${SCRIPT_DIR}/train_s2d_opd.sh"
