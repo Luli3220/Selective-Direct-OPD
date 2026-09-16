@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generic sparse Direct-OPD training entry point.
+# Main selective-direct-opd training entry point.
 # Relative mode retains the highest JS_TOP_FRACTION using JS_TOKEN_SELECTION_AGGREGATION.
 # Absolute mode retains valid tokens at or above JS_DIVERGENCE_THRESHOLD.
 
@@ -29,18 +29,19 @@ if [ ! -x "${RAY_BIN}" ]; then
 fi
 
 
-DATA_ROOT=${DATA_ROOT:-datasets}
+MODEL_ROOT=${MODEL_ROOT:-"${REPO_ROOT}/models"}
+DATA_ROOT=${DATA_ROOT:-"${REPO_ROOT}/datasets"}
 OUTPUT_ROOT=${OUTPUT_ROOT:-checkpoints}
 LOG_ROOT=${LOG_ROOT:-logs}
 
-PROJECT_NAME=${PROJECT_NAME:-Direct-OPD}
+PROJECT_NAME=${PROJECT_NAME:-selective-direct-opd}
 JS_LADDER_SPLIT=${JS_LADDER_SPLIT:-90_100}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-justrl_qwen3_1p7b_js_${JS_LADDER_SPLIT}_kl}
-ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-"/ai/yzx/Models/Qwen3-1.7B"}
-REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-"/ai/yzx/yzx1/Direct-OPD/Models/JustRL-DeepSeek-1.5B"}
-TEACHER_REF_MODEL_PATH=${TEACHER_REF_MODEL_PATH:-"/ai/yzx/yzx1/Direct-OPD/Models/DeepSeek-R1-Distill-Qwen-1.5B"}
+ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-"${MODEL_ROOT}/Qwen3-1.7B"}
+REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-"${MODEL_ROOT}/JustRL-DeepSeek-1.5B"}
+TEACHER_REF_MODEL_PATH=${TEACHER_REF_MODEL_PATH:-"${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B"}
 TRAIN_DATASET=${TRAIN_DATASET:-"${DATA_ROOT}/train/skywork-or1-math-dapo-original.parquet"}
-TEST_DATASET=${TEST_DATASET:-"['${REPO_ROOT}/datasets/eval/aime24.parquet','${REPO_ROOT}/datasets/eval/aime25.parquet']"}
+TEST_DATASET=${TEST_DATASET:-"['${REPO_ROOT}/eval/aime24.parquet','${REPO_ROOT}/eval/aime25.parquet']"}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"${OUTPUT_ROOT}/${EXPERIMENT_NAME}"}
 OUTPUTS_DIR=${OUTPUTS_DIR:-"${CHECKPOINT_DIR}/outputs"}
 TRAIN_LOG=${TRAIN_LOG:-"${LOG_ROOT}/${EXPERIMENT_NAME}.log"}
@@ -88,6 +89,8 @@ ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-True}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NUM_NODES=${NUM_NODES:-1}
 LOGGER=${LOGGER:-"['console', 'wandb']"}
+REWARD_MODEL_ENABLE=${REWARD_MODEL_ENABLE:-True}
+TEACHER_REF_REWARD_MODEL_ENABLE=${TEACHER_REF_REWARD_MODEL_ENABLE:-True}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
 VAL_ONLY=${VAL_ONLY:-False}
 LOG_VAL_GENERATIONS=${LOG_VAL_GENERATIONS:-2}
@@ -213,7 +216,7 @@ set +e
   actor_rollout_ref.rollout.repetition_penalty="${REPETITION_PENALTY}" \
   actor_rollout_ref.rollout.calculate_log_probs=True \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-  reward_model.enable=True \
+  reward_model.enable="${REWARD_MODEL_ENABLE}" \
   +reward_model.reward_kwargs.enable_format_reward=False \
   reward_model.model.path="${REWARD_MODEL_PATH}" \
   reward_model.model.input_tokenizer=null \
@@ -221,7 +224,7 @@ set +e
   reward_model.model.fsdp_config.param_offload=False \
   +reward_model.model.dtype="${MODEL_DTYPE}" \
   reward_model.micro_batch_size_per_gpu=24 \
-  +teacher_ref_reward_model.enable=True \
+  +teacher_ref_reward_model.enable="${TEACHER_REF_REWARD_MODEL_ENABLE}" \
   +teacher_ref_reward_model.model.path="${TEACHER_REF_MODEL_PATH}" \
   +teacher_ref_reward_model.model.input_tokenizer=null \
   +teacher_ref_reward_model.model.use_remove_padding=True \

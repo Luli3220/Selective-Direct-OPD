@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+/models/
+/datasets/
+/checkpoint/
+/checkpoints/
+/logs/
+/outputs/
+/validation_log/
+/wandb/
+/swanlab_log/
+/results/
+/temp_files/

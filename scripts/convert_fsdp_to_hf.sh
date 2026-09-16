@@ -12,7 +12,7 @@ HF_OUTPUT_PATH=${HF_OUTPUT_PATH:-"${REPO_ROOT}/checkpoints/justrl_qwen3_1p7b/glo
 #   bash scripts/convert_fsdp_to_hf.sh /path/to/global_step_xxx /path/to/hf_output
 CHECKPOINT_PATH=${1:-"${CHECKPOINT_PATH}"}
 HF_OUTPUT_PATH=${2:-"${HF_OUTPUT_PATH}"}
-PYTHON_BIN=${PYTHON_BIN:-python}
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python)}
 
 if [ -f "${CHECKPOINT_PATH}/actor/fsdp_config.json" ]; then
   ACTOR_PATH="${CHECKPOINT_PATH}/actor"
